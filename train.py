@@ -28,9 +28,7 @@ from utils.logger import setup_logger
 from core.mt5_connector import MT5Connector
 from core.feature_engine import FeatureEngine
 from brain.regime_classifier import RegimeClassifier
-from brain.perception import PerceptionModule
 from brain.backtest_env import BacktestEnv
-from brain.reward import RewardCalculator
 
 logger = logging.getLogger("apex_predator.train")
 
@@ -136,7 +134,6 @@ def preprocess_data(df: pd.DataFrame, config: ApexConfig):
 def create_train_env(
     bars, features, regimes, spreads, atrs,
     config: ApexConfig,
-    perception: PerceptionModule,
 ) -> BacktestEnv:
     """Create the backtesting environment for training."""
 
@@ -158,9 +155,7 @@ def create_train_env(
         regimes=regimes,
         spreads=spreads,
         atrs=atrs,
-        perception_module=perception,
-        perception_dim=config.perception.embedding_dim,
-        sequence_length=config.perception.sequence_length,
+        lookback=10,
         reward_config=config.reward,
         initial_balance=10000.0,
         lot_size=0.01,
@@ -332,14 +327,9 @@ Examples:
     bars, features, regimes, spreads, atrs = preprocess_data(df, config)
     logger.info("Preprocessed: %d bars → %d valid samples", len(df), len(bars))
 
-    # ── Step 3: Create Perception ───────────
-    logger.info("Initializing Perception Module...")
-    config.perception.device = "cpu"  # Safe default for training
-    perception = PerceptionModule(config.perception)
-
-    # ── Step 4: Create Environment ──────────
-    logger.info("Creating BacktestEnv...")
-    env = create_train_env(bars, features, regimes, spreads, atrs, config, perception)
+    # ── Step 3: Create Environment ──────────
+    logger.info("Creating BacktestEnv (raw features, no LSTM)...")
+    env = create_train_env(bars, features, regimes, spreads, atrs, config)
 
     # Quick sanity check
     obs, _ = env.reset()
