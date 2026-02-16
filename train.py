@@ -188,6 +188,11 @@ def train_model(env: BacktestEnv, config: ApexConfig, total_timesteps: int):
 
     # ── Create PPO Model ────────────────────
     # Note: tensorboard_log=None to avoid requiring tensorboard package
+    # Use a larger network for better pattern recognition
+    policy_kwargs = dict(
+        net_arch=dict(pi=[256, 256], vf=[256, 256]),
+    )
+
     model = PPO(
         "MlpPolicy",
         env,
@@ -195,12 +200,13 @@ def train_model(env: BacktestEnv, config: ApexConfig, total_timesteps: int):
         gamma=config.drl.gamma,
         gae_lambda=config.drl.gae_lambda,
         clip_range=config.drl.clip_range,
-        n_steps=min(config.drl.n_steps, env.max_steps // 2),  # Fit within data
+        n_steps=min(config.drl.n_steps, env.max_steps // 2),
         batch_size=config.drl.batch_size,
         n_epochs=config.drl.n_epochs,
         ent_coef=config.drl.ent_coef,
         vf_coef=config.drl.vf_coef,
         max_grad_norm=config.drl.max_grad_norm,
+        policy_kwargs=policy_kwargs,
         tensorboard_log=None,
         verbose=1,
     )

@@ -114,7 +114,7 @@ class DRLConfig:
     n_steps: int = 2048                  # Steps per update
     batch_size: int = 64                 # Mini-batch size
     n_epochs: int = 10                   # PPO epochs per update
-    ent_coef: float = 0.01              # Entropy coefficient
+    ent_coef: float = 0.001             # Entropy coefficient (low = less random)
     vf_coef: float = 0.5                # Value function coefficient
     max_grad_norm: float = 0.5          # Gradient clipping
     total_timesteps: int = 1_000_000     # Total training timesteps
@@ -152,8 +152,8 @@ class RiskConfig:
     max_concurrent_trades: int = 3       # Max open positions
     max_lot_size: float = 1.0            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
-    atr_multiplier: float = 1.5          # SL = ATR * multiplier
-    tp_ratio: float = 2.0               # TP = SL * ratio (Risk:Reward)
+    atr_multiplier: float = 1.0          # SL = ATR * multiplier (tight for scalping)
+    tp_ratio: float = 1.5               # TP = SL * ratio (1:1.5 — easier to hit)
 
 
 # ──────────────────────────────────────────────

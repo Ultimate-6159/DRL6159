@@ -283,28 +283,37 @@ class BacktestEnv(gym.Env):
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        Reward shaping:
-        - Win → strong positive (+1.0 bonus)
-        - Loss → moderate negative
+        Reward shaping for HIGH ACCURACY HFT:
+        - Win → BIG reward (+2.0 base) — encourages precision
+        - Loss → HARSH penalty (-2.0 base) — forces selectivity
         - TP hit → extra bonus
+        - Win streak → escalating bonus
         """
         pnl_norm = pnl / self.initial_balance * 100
 
         if pnl >= 0:
-            reward = pnl_norm * 1.5  # Amplify gains
-            reward += 1.0  # Win bonus
+            reward = pnl_norm * 2.0
+            reward += 2.0  # Strong win bonus
             if event_type == "TP":
-                reward += 0.5  # Extra for TP
+                reward += 1.0  # TP bonus
+
+            # Win streak bonus
+            recent = self._returns_buffer[-5:] if len(self._returns_buffer) >= 5 else self._returns_buffer
+            if len(recent) > 0:
+                streak = sum(1 for r in reversed(recent) if r > 0)
+                reward += streak * 0.3  # Escalating streak bonus
         else:
-            reward = pnl_norm * 0.8  # Moderate losses
-            reward -= 0.2  # Loss penalty
+            reward = pnl_norm * 1.5  # Amplify loss pain
+            reward -= 2.0  # Strong loss penalty
+            if event_type == "SL":
+                reward -= 0.5  # Extra SL penalty
 
         # Drawdown penalty
         dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
-        if dd > 0.05:
-            reward -= dd * 2.0
+        if dd > 0.03:
+            reward -= dd * 3.0
 
-        return float(np.clip(reward, -5.0, 10.0))
+        return float(np.clip(reward, -8.0, 10.0))
 
     def _get_observation(self):
         """
