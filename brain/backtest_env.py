@@ -136,6 +136,7 @@ class BacktestEnv(gym.Env):
         self.losses = 0
         self.total_pnl = 0.0
         self.hold_bars = 0
+        self.bars_without_trade = 0  # Track inactivity
         self._returns_buffer = []
 
     def reset(self, *, seed=None, options=None):
@@ -223,8 +224,12 @@ class BacktestEnv(gym.Env):
         else:
             # ── No position — evaluate action ──
             if action == TradeAction.HOLD.value:
-                reward = 0.0  # No penalty for holding cash
+                # Inactivity penalty — grows over time to force trading
+                self.bars_without_trade += 1
+                inactivity_scale = min(self.bars_without_trade / 50.0, 1.0)
+                reward = -0.05 * inactivity_scale  # Grows from -0.001 to -0.05
             else:
+                self.bars_without_trade = 0  # Reset on trade
                 reward += self._open_position(action, close, spread, atr)
 
         # ── Advance ─────────────────────────
@@ -259,7 +264,7 @@ class BacktestEnv(gym.Env):
         """Open a new position. Returns small negative reward for spread cost."""
         direction = 1 if action == TradeAction.BUY.value else -1
 
-        # Entry price with spread cost
+        # Entry price with spread cost (realistic but small)
         spread_cost = spread * self.point_value
         if direction == 1:
             entry = close + spread_cost / 2
@@ -286,9 +291,8 @@ class BacktestEnv(gym.Env):
         }
         self.hold_bars = 0
 
-        # Small negative reward for spread cost
-        spread_penalty = -(spread_cost * self.lot_size * self.contract_size) / self.initial_balance
-        return spread_penalty * 10  # Scale for signal
+        # Minimal spread penalty — just a small friction, not a wall
+        return -0.01
 
     def _close_position(self, pnl: float):
         """Close position and update stats."""
@@ -306,22 +310,27 @@ class BacktestEnv(gym.Env):
     def _compute_reward(self, pnl: float, is_closed: bool) -> float:
         """
         Compute reward with asymmetric weighting.
-        Losses penalized more than gains rewarded.
+        - Wins get BONUS reward to incentivize profitable trading
+        - Losses are penalized but not so much that model stops trading
         """
         # Normalize PnL relative to initial balance
         pnl_norm = pnl / self.initial_balance * 100  # Scale up
 
         if pnl >= 0:
+            # Boost wins — model needs strong positive signal
             reward = pnl_norm * self.reward_config.profit_reward
+            reward += 1.0  # Bonus for any winning trade
         else:
-            reward = pnl_norm * abs(self.reward_config.loss_penalty)
+            # Penalize losses but moderately
+            reward = pnl_norm * abs(self.reward_config.loss_penalty) * 0.5
+            reward -= 0.3  # Small fixed loss penalty
 
         # Drawdown penalty
         drawdown = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
         if drawdown > 0.05:
-            reward += self.reward_config.drawdown_penalty * drawdown
+            reward += self.reward_config.drawdown_penalty * drawdown * 0.5
 
-        return float(np.clip(reward, -10.0, 10.0))
+        return float(np.clip(reward, -5.0, 10.0))
 
     def _get_observation(self) -> np.ndarray:
         """Build observation at current step."""
