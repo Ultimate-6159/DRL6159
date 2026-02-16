@@ -109,16 +109,18 @@ class PerceptionConfig:
 class DRLConfig:
     """PPO / SAC reinforcement learning settings."""
     algorithm: str = "PPO"               # "PPO" or "SAC"
-    learning_rate: float = 1e-4          # Slower LR → more stable
+    learning_rate: float = 3e-5          # Reduced 3x from 1e-4 → stability
     gamma: float = 0.99                  # Discount factor
     gae_lambda: float = 0.95            # GAE lambda
-    clip_range: float = 0.2             # PPO clip range
+    clip_range: float = 0.15            # Slightly wider for exploration
     n_steps: int = 4096                  # More experience per update
     batch_size: int = 128                # Larger batch → lower variance
-    n_epochs: int = 15                   # More learning per update
-    ent_coef: float = 0.005             # More exploration early on
+    n_epochs: int = 10                   # Reduced from 15 → less KL divergence
+    ent_coef: float = 0.02              # 4x higher → prevent entropy collapse
     vf_coef: float = 0.5                # Value function coefficient
-    max_grad_norm: float = 0.5          # Gradient clipping
+    max_grad_norm: float = 0.3          # Tighter clipping → smoother updates
+    target_kl: float = 0.015            # Early-stop epoch if KL exceeds this
+    normalize_advantage: bool = True     # Normalize advantages for stability
     total_timesteps: int = 2_000_000     # Train longer for better convergence
     model_save_path: str = "models/"     # Model checkpoint directory
     tensorboard_log: str = "logs/tb/"    # TensorBoard log directory
@@ -173,6 +175,34 @@ class CircuitBreakerConfig:
 
 
 # ──────────────────────────────────────────────
+# Curriculum Learning Configuration
+# ──────────────────────────────────────────────
+
+@dataclass
+class CurriculumConfig:
+    """Progressive training: easy → hard market conditions."""
+    enabled: bool = True
+    # Fraction of total timesteps per phase [trending, +ranging, all]
+    phase_ratios: List[float] = field(default_factory=lambda: [0.30, 0.35, 0.35])
+    min_segment_length: int = 100        # Min contiguous bars to form a segment
+
+
+# ──────────────────────────────────────────────
+# Imitation Learning Configuration
+# ──────────────────────────────────────────────
+
+@dataclass
+class ImitationConfig:
+    """Behavioral cloning pre-training from hindsight-optimal trades."""
+    enabled: bool = True
+    epochs: int = 10                     # BC training epochs
+    learning_rate: float = 1e-3          # BC learning rate
+    batch_size: int = 256                # Supervised mini-batch size
+    lookahead_bars: int = 30             # How far to look ahead for oracle
+    min_trend_strength: float = 0.6      # Only label bars with clear signal
+
+
+# ──────────────────────────────────────────────
 # Evolution / Self-Learning Configuration
 # ──────────────────────────────────────────────
 
@@ -223,6 +253,8 @@ class ApexConfig:
     circuit_breaker: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
+    imitation: ImitationConfig = field(default_factory=ImitationConfig)
 
     # Global
     dry_run: bool = True                 # True = mock mode, no real orders

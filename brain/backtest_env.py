@@ -339,7 +339,8 @@ class BacktestEnv(gym.Env):
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        Expectancy-based reward for high-frequency scalping:
+        Expectancy-based reward for high-frequency scalping.
+        Scaled down 3x from original to keep value function stable:
         - Win → proportional reward + TP bonus + streak bonus
         - Loss → moderate penalty (don't over-punish → agent still trades)
         - Force close → extra penalty (should cut earlier)
@@ -348,39 +349,39 @@ class BacktestEnv(gym.Env):
         pnl_norm = pnl / self.initial_balance * 100
 
         if pnl >= 0:
-            # Win: base bonus + proportional reward
-            reward = 1.0 + pnl_norm * 3.0
+            # Win: base bonus + proportional reward (scaled 3x down)
+            reward = 0.3 + pnl_norm * 1.0
 
             if event_type == "TP":
-                reward += 2.0  # Strong TP bonus
+                reward += 0.7  # TP bonus
 
             # Win streak escalation
-            reward += min(self._consecutive_wins, 5) * 0.3
+            reward += min(self._consecutive_wins, 5) * 0.1
 
             # Profitable consistency bonus
             if self._recent_trades >= 10:
                 recent_wr = self._recent_wins / self._recent_trades
                 if recent_wr >= 0.5:
-                    reward += 0.5  # Consistency bonus
+                    reward += 0.15  # Consistency bonus
         else:
-            # Loss: moderate penalty
-            reward = -0.5 + pnl_norm * 1.5
+            # Loss: moderate penalty (scaled down)
+            reward = -0.2 + pnl_norm * 0.5
 
             if event_type == "SL":
-                reward -= 0.3  # SL hit is acceptable (controlled loss)
+                reward -= 0.1  # SL hit is acceptable (controlled loss)
             elif event_type == "FORCE":
-                reward -= 1.5  # Force close = bad (should have closed earlier)
+                reward -= 0.5  # Force close = bad (should have closed earlier)
 
             # Consecutive loss penalty
             if self._consecutive_losses >= 3:
-                reward -= 0.5 * (self._consecutive_losses - 2)
+                reward -= 0.15 * (self._consecutive_losses - 2)
 
         # Drawdown penalty — soft, above 5%
         dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
         if dd > 0.05:
-            reward -= dd * 2.0
+            reward -= dd * 0.7
 
-        return float(np.clip(reward, -6.0, 12.0))
+        return float(np.clip(reward, -2.0, 4.0))
 
     def _get_observation(self):
         """

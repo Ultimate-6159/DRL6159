@@ -29,6 +29,8 @@ from core.mt5_connector import MT5Connector
 from core.feature_engine import FeatureEngine
 from brain.regime_classifier import RegimeClassifier
 from brain.backtest_env import BacktestEnv
+from brain.curriculum import CurriculumScheduler
+from brain.imitation import ExpertGenerator, ImitationPreTrainer
 
 logger = logging.getLogger("apex_predator.train")
 
@@ -174,6 +176,7 @@ def train_model(env: BacktestEnv, config: ApexConfig, total_timesteps: int):
     from stable_baselines3.common.callbacks import (
         CheckpointCallback, EvalCallback,
     )
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
     os.makedirs(config.drl.model_save_path, exist_ok=True)
 
@@ -186,26 +189,46 @@ def train_model(env: BacktestEnv, config: ApexConfig, total_timesteps: int):
     logger.info("   Clip Range: %s", config.drl.clip_range)
     logger.info("=" * 60)
 
+    # ── Cosine LR Schedule ──────────────────
+    def cosine_lr_schedule(progress_remaining: float) -> float:
+        """Cosine decay: LR decays from 1.0x to 0.1x over training."""
+        import math
+        return 0.1 + 0.9 * (1 + math.cos(math.pi * (1 - progress_remaining))) / 2
+
+    # ── Wrap env with VecNormalize (reward only) ──
+    vec_env = DummyVecEnv([lambda: env])
+    vec_env = VecNormalize(
+        vec_env,
+        norm_obs=False,       # Features already normalized
+        norm_reward=True,     # Normalize rewards → stable value function
+        clip_reward=10.0,
+        gamma=config.drl.gamma,
+    )
+
     # ── Create PPO Model ────────────────────
-    # Note: tensorboard_log=None to avoid requiring tensorboard package
-    # Use a larger network for better pattern recognition
     policy_kwargs = dict(
         net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),
     )
 
+    safe_n_steps = max(
+        min(config.drl.n_steps, env.max_steps - 1) // config.drl.batch_size, 1
+    ) * config.drl.batch_size
+
     model = PPO(
         "MlpPolicy",
-        env,
-        learning_rate=config.drl.learning_rate,
+        vec_env,
+        learning_rate=lambda p: config.drl.learning_rate * cosine_lr_schedule(p),
         gamma=config.drl.gamma,
         gae_lambda=config.drl.gae_lambda,
         clip_range=config.drl.clip_range,
-        n_steps=min(config.drl.n_steps, env.max_steps // 2),
+        n_steps=safe_n_steps,
         batch_size=config.drl.batch_size,
         n_epochs=config.drl.n_epochs,
         ent_coef=config.drl.ent_coef,
         vf_coef=config.drl.vf_coef,
         max_grad_norm=config.drl.max_grad_norm,
+        target_kl=config.drl.target_kl,
+        normalize_advantage=config.drl.normalize_advantage,
         policy_kwargs=policy_kwargs,
         tensorboard_log=None,
         verbose=1,
@@ -231,12 +254,216 @@ def train_model(env: BacktestEnv, config: ApexConfig, total_timesteps: int):
     elapsed = time.time() - t0
     logger.info("Training complete in %.1f seconds (%.1f min)", elapsed, elapsed / 60)
 
-    # ── Save Final Model ────────────────────
+    # ── Save Final Model + VecNormalize stats ──
     save_path = os.path.join(config.drl.model_save_path, "drl_model")
     model.save(save_path)
+    vec_env.save(os.path.join(config.drl.model_save_path, "vec_normalize.pkl"))
     logger.info("Model saved to: %s", save_path)
 
     return model
+
+
+def train_with_curriculum(
+    bars, features, regimes, spreads, atrs,
+    config: ApexConfig,
+    total_timesteps: int,
+    use_imitation: bool = True,
+    imitation_epochs: int = 10,
+):
+    """
+    Full training pipeline with Imitation Learning + Curriculum Learning.
+
+    Flow:
+      1. Create initial env (full data)
+      2. Imitation pre-training (behavioral cloning from expert oracle)
+      3. Curriculum Phase 1: trending only
+      4. Curriculum Phase 2: trending + ranging
+      5. Curriculum Phase 3: all regimes
+    """
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.callbacks import CheckpointCallback
+    from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
+    os.makedirs(config.drl.model_save_path, exist_ok=True)
+
+    # ── Step 1: Create initial model on full data ────────
+    logger.info("Creating initial environment on full dataset...")
+    full_env = create_train_env(bars, features, regimes, spreads, atrs, config)
+
+    # ── Wrap with VecNormalize (reward only) ─────────────
+    vec_env = DummyVecEnv([lambda: full_env])
+    vec_env = VecNormalize(
+        vec_env,
+        norm_obs=False,
+        norm_reward=True,
+        clip_reward=10.0,
+        gamma=config.drl.gamma,
+    )
+
+    # ── Cosine LR Schedule ──────────────────
+    def cosine_lr_schedule(progress_remaining: float) -> float:
+        """Cosine decay: LR decays from 1.0x to 0.1x over training."""
+        import math
+        return 0.1 + 0.9 * (1 + math.cos(math.pi * (1 - progress_remaining))) / 2
+
+    policy_kwargs = dict(
+        net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),
+    )
+
+    safe_n_steps = max(
+        min(config.drl.n_steps, full_env.max_steps - 1) // config.drl.batch_size, 1
+    ) * config.drl.batch_size
+
+    model = PPO(
+        "MlpPolicy",
+        vec_env,
+        learning_rate=lambda p: config.drl.learning_rate * cosine_lr_schedule(p),
+        gamma=config.drl.gamma,
+        gae_lambda=config.drl.gae_lambda,
+        clip_range=config.drl.clip_range,
+        n_steps=safe_n_steps,
+        batch_size=config.drl.batch_size,
+        n_epochs=config.drl.n_epochs,
+        ent_coef=config.drl.ent_coef,
+        vf_coef=config.drl.vf_coef,
+        max_grad_norm=config.drl.max_grad_norm,
+        target_kl=config.drl.target_kl,
+        normalize_advantage=config.drl.normalize_advantage,
+        policy_kwargs=policy_kwargs,
+        tensorboard_log=None,
+        verbose=1,
+    )
+
+    # ── Step 2: Imitation Pre-Training ───────────────────
+    if use_imitation and config.imitation.enabled:
+        logger.info("")
+        logger.info("🎓 IMITATION LEARNING — Pre-Training from Expert Oracle")
+        logger.info("=" * 60)
+
+        config.imitation.epochs = imitation_epochs
+
+        expert_gen = ExpertGenerator(
+            lookahead_bars=config.imitation.lookahead_bars,
+            sl_atr_mult=config.risk.atr_multiplier,
+            tp_atr_mult=config.risk.atr_multiplier * config.risk.tp_ratio,
+        )
+        expert_labels = expert_gen.generate_labels(bars, atrs)
+
+        pre_trainer = ImitationPreTrainer(config.imitation)
+        bc_stats = pre_trainer.pretrain(
+            model=model,
+            env=full_env,
+            expert_labels=expert_labels,
+            features=features,
+            regimes=regimes,
+        )
+
+        if not bc_stats.get("skipped"):
+            logger.info("✅ Imitation pre-training complete!")
+        else:
+            logger.warning("⚠️ Imitation pre-training skipped: %s",
+                           bc_stats.get("reason", "unknown"))
+    else:
+        logger.info("Imitation learning disabled — skipping.")
+
+    # ── Step 3: Curriculum Training ──────────────────────
+    scheduler = CurriculumScheduler(config.curriculum)
+
+    if config.curriculum.enabled:
+        schedule = scheduler.get_phase_schedule(total_timesteps)
+
+        for phase in schedule:
+            logger.info("")
+            logger.info("📚 %s — %s", phase["name"], phase["description"])
+            logger.info("   Timesteps: %s | Regimes: %s",
+                         f"{phase['timesteps']:,}", phase["regimes"])
+            logger.info("=" * 60)
+
+            # Filter data for this phase
+            p_bars, p_feats, p_regimes, p_spreads, p_atrs = \
+                scheduler.filter_data_by_regimes(
+                    bars, features, regimes, spreads, atrs,
+                    allowed_regimes=phase["regimes"],
+                )
+
+            if len(p_bars) < 200:
+                logger.warning(
+                    "Skipping %s — too few bars (%d)",
+                    phase["name"], len(p_bars),
+                )
+                continue
+
+            # Create env for this phase
+            phase_env = create_train_env(
+                p_bars, p_feats, p_regimes, p_spreads, p_atrs, config
+            )
+
+            scheduler.log_phase_stats(phase["name"], p_bars, p_regimes)
+
+            # Compute n_steps for this phase env
+            batch_sz = config.drl.batch_size
+            max_n = max(phase_env.max_steps - 1, batch_sz)
+            desired_n = min(config.drl.n_steps, max_n)
+            desired_n = max(desired_n // batch_sz, 1) * batch_sz
+
+            # Wrap phase env with VecNormalize (reward only)
+            phase_vec_env = DummyVecEnv([lambda: phase_env])
+            phase_vec_env = VecNormalize(
+                phase_vec_env,
+                norm_obs=False,
+                norm_reward=True,
+                clip_reward=10.0,
+                gamma=config.drl.gamma,
+            )
+
+            # Save current model weights, then reload into a fresh PPO
+            # with the new env. This properly rebuilds the rollout buffer.
+            tmp_path = os.path.join(config.drl.model_save_path, "_phase_tmp")
+            model.save(tmp_path)
+
+            model = PPO.load(
+                tmp_path,
+                env=phase_vec_env,
+                n_steps=desired_n,
+                batch_size=batch_sz,
+                tensorboard_log=None,
+                verbose=1,
+            )
+
+            # Train this phase
+            checkpoint_cb = CheckpointCallback(
+                save_freq=max(phase["timesteps"] // 5, 1000),
+                save_path=config.drl.model_save_path,
+                name_prefix=f"ppo_phase{phase['phase_idx']}",
+            )
+
+            t0 = time.time()
+            model.learn(
+                total_timesteps=phase["timesteps"],
+                callback=checkpoint_cb,
+                progress_bar=False,
+                reset_num_timesteps=True,  # Fresh count per phase
+            )
+            elapsed = time.time() - t0
+            logger.info(
+                "%s complete in %.1f sec (%.1f min)",
+                phase["name"], elapsed, elapsed / 60,
+            )
+    else:
+        logger.info("Curriculum disabled — training on full data.")
+        model = train_model(full_env, config, total_timesteps)
+
+    # ── Save Final Model + VecNormalize stats ────────────
+    save_path = os.path.join(config.drl.model_save_path, "drl_model")
+    model.save(save_path)
+    norm_path = os.path.join(config.drl.model_save_path, "vec_normalize.pkl")
+    model_env = model.get_env()
+    if isinstance(model_env, VecNormalize):
+        model_env.save(norm_path)
+        logger.info("VecNormalize stats saved to: %s", norm_path)
+    logger.info("Model saved to: %s", save_path)
+
+    return model, full_env
 
 
 def evaluate_model(model, env: BacktestEnv, n_episodes: int = 5):
@@ -288,6 +515,8 @@ Examples:
   python train.py --bars 50000             # More data
   python train.py --timesteps 500000       # Train longer
   python train.py --no-mt5                 # Without MT5
+  python train.py --no-curriculum          # Skip curriculum
+  python train.py --no-imitation           # Skip imitation
   python train.py --symbol XAUUSDm --tf M5 # Gold on M5
         """,
     )
@@ -301,6 +530,12 @@ Examples:
                         help="Timeframe (overrides settings.py)")
     parser.add_argument("--no-mt5", action="store_true",
                         help="Use mock data instead of MT5")
+    parser.add_argument("--no-curriculum", action="store_true",
+                        help="Disable curriculum learning (train on all data)")
+    parser.add_argument("--no-imitation", action="store_true",
+                        help="Disable imitation pre-training")
+    parser.add_argument("--imitation-epochs", type=int, default=10,
+                        help="Number of behavioral cloning epochs (default: 10)")
     parser.add_argument("--eval-episodes", type=int, default=5,
                         help="Number of evaluation episodes after training")
     parser.add_argument("--log-level", type=str, default="INFO",
@@ -315,6 +550,10 @@ Examples:
         config.mt5.symbol = args.symbol
     if args.tf:
         config.mt5.timeframe = args.tf
+    if args.no_curriculum:
+        config.curriculum.enabled = False
+    if args.no_imitation:
+        config.imitation.enabled = False
 
     # ── Setup Logger ────────────────────────
     setup_logger(log_dir=config.log_dir, level=config.log_level)
@@ -324,6 +563,9 @@ Examples:
     logger.info("   Symbol: %s | TF: %s", config.mt5.symbol, config.mt5.timeframe)
     logger.info("   Bars: %s | Timesteps: %s",
                 f"{args.bars:,}", f"{args.timesteps:,}")
+    logger.info("   Curriculum: %s | Imitation: %s",
+                "ON" if config.curriculum.enabled else "OFF",
+                "ON" if config.imitation.enabled else "OFF")
     logger.info("=" * 60)
 
     # ── Step 1: Download Data ───────────────
@@ -333,20 +575,18 @@ Examples:
     bars, features, regimes, spreads, atrs = preprocess_data(df, config)
     logger.info("Preprocessed: %d bars → %d valid samples", len(df), len(bars))
 
-    # ── Step 3: Create Environment ──────────
+    # ── Step 3: Train (Imitation + Curriculum) ──
     logger.info("Creating BacktestEnv (raw features, no LSTM)...")
-    env = create_train_env(bars, features, regimes, spreads, atrs, config)
+    model, eval_env = train_with_curriculum(
+        bars, features, regimes, spreads, atrs,
+        config=config,
+        total_timesteps=args.timesteps,
+        use_imitation=not args.no_imitation,
+        imitation_epochs=args.imitation_epochs,
+    )
 
-    # Quick sanity check
-    obs, _ = env.reset()
-    logger.info("Env sanity check: obs_shape=%s, action_space=%s",
-                obs.shape, env.action_space)
-
-    # ── Step 5: Train ───────────────────────
-    model = train_model(env, config, args.timesteps)
-
-    # ── Step 6: Evaluate ────────────────────
-    evaluate_model(model, env, n_episodes=args.eval_episodes)
+    # ── Step 4: Evaluate ────────────────────
+    evaluate_model(model, eval_env, n_episodes=args.eval_episodes)
 
     logger.info("")
     logger.info("✅ Training complete! Model saved to: %s",
