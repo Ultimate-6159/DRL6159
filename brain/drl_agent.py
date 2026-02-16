@@ -34,11 +34,12 @@ class ForexTradingEnv(gym.Env):
     Gymnasium environment for Forex scalping.
     Used for both training and live inference wrapping.
 
-    Observation Space:
-        - Perception embedding (64-dim)
+    Observation Space (must match BacktestEnv exactly):
+        - Last `lookback` bars of raw features, flattened  (lookback * feature_dim)
         - Regime one-hot (4-dim)
-        - Account state (3-dim: balance_norm, position_pnl_norm, spread_norm)
-        Total: embedding_dim + 4 + 3
+        - Account state (7-dim): balance_norm, pnl_norm, spread_norm,
+          has_position, hold_time_norm, recent_wr, drawdown
+        Total: lookback * feature_dim + 4 + 7
 
     Action Space:
         Discrete(3): BUY=0, SELL=1, HOLD=2
@@ -48,16 +49,18 @@ class ForexTradingEnv(gym.Env):
 
     def __init__(
         self,
-        perception_dim: int = 64,
+        feature_dim: int = 17,
+        lookback: int = 10,
         reward_config: Optional[RewardConfig] = None,
     ):
         super().__init__()
 
-        self.perception_dim = perception_dim
+        self.feature_dim = feature_dim
+        self.lookback = lookback
         n_regimes = len(MarketRegime)
-        n_account = 3  # balance_norm, pnl_norm, spread_norm
+        n_account = 7  # balance, pnl, spread, has_position, hold_time, win_rate, drawdown
 
-        obs_dim = perception_dim + n_regimes + n_account
+        obs_dim = lookback * feature_dim + n_regimes + n_account
 
         # Observation: continuous vector
         self.observation_space = spaces.Box(
@@ -108,28 +111,40 @@ class ForexTradingEnv(gym.Env):
 
     @staticmethod
     def build_observation(
-        perception_embedding: np.ndarray,
+        features_flat: np.ndarray,
         regime_one_hot: np.ndarray,
         balance_norm: float,
         pnl_norm: float,
         spread_norm: float,
+        has_position: float = 0.0,
+        hold_time_norm: float = 0.0,
+        recent_wr: float = 0.0,
+        drawdown: float = 0.0,
     ) -> np.ndarray:
         """
-        Build observation vector from components.
+        Build observation vector matching BacktestEnv format.
 
         Args:
-            perception_embedding: (embedding_dim,) from LSTM
+            features_flat: (lookback * feature_dim,) raw features flattened
             regime_one_hot: (4,) from RegimeClassifier
             balance_norm: Normalized balance (equity / initial_equity - 1)
             pnl_norm: Normalized current P&L
             spread_norm: Normalized spread
+            has_position: 1.0 if position open, else 0.0
+            hold_time_norm: Normalized hold time
+            recent_wr: Recent win rate
+            drawdown: Current drawdown fraction
 
         Returns:
             (obs_dim,) float32 array
         """
-        account = np.array([balance_norm, pnl_norm, spread_norm], dtype=np.float32)
+        account = np.array([
+            balance_norm, pnl_norm, spread_norm,
+            has_position, hold_time_norm,
+            recent_wr, drawdown,
+        ], dtype=np.float32)
         return np.concatenate([
-            perception_embedding.astype(np.float32),
+            features_flat.astype(np.float32),
             regime_one_hot.astype(np.float32),
             account,
         ])
@@ -150,10 +165,13 @@ class DRLAgent:
         config: DRLConfig,
         perception_config: PerceptionConfig,
         reward_config: RewardConfig,
+        feature_dim: int = 17,
+        lookback: int = 10,
     ):
         self.config = config
         self.env = ForexTradingEnv(
-            perception_dim=perception_config.embedding_dim,
+            feature_dim=feature_dim,
+            lookback=lookback,
             reward_config=reward_config,
         )
         self.model = None
@@ -293,16 +311,28 @@ class DRLAgent:
         logger.info("DRL model saved to %s", save_path)
 
     def load(self, path: Optional[str] = None):
-        """Load model checkpoint."""
+        """Load model checkpoint, restoring VecNormalize if available."""
         try:
             from stable_baselines3 import PPO, SAC
+            from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
             load_path = path or os.path.join(
                 self.config.model_save_path, "drl_model"
             )
+            norm_path = os.path.join(
+                self.config.model_save_path, "vec_normalize.pkl"
+            )
+
+            # Wrap env the same way training does
+            vec_env = DummyVecEnv([lambda: self.env])
+            if os.path.exists(norm_path):
+                vec_env = VecNormalize.load(norm_path, vec_env)
+                vec_env.training = False
+                vec_env.norm_reward = False
+                logger.info("VecNormalize stats loaded from %s", norm_path)
 
             AlgoClass = PPO if self.config.algorithm == "PPO" else SAC
-            self.model = AlgoClass.load(load_path, env=self.env)
+            self.model = AlgoClass.load(load_path, env=vec_env)
             self._initialized = True
             logger.info("DRL model loaded from %s", load_path)
         except Exception as e:

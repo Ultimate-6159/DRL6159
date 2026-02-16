@@ -85,19 +85,23 @@ class TestPerception:
 class TestForexEnv:
     def test_observation_space(self, config):
         env = ForexTradingEnv(
-            perception_dim=config.perception.embedding_dim,
+            feature_dim=17,
+            lookback=10,
             reward_config=config.reward,
         )
         obs, info = env.reset()
         assert obs.shape == env.observation_space.shape
+        assert obs.shape == (10 * 17 + 4 + 7,)
 
     def test_build_observation(self, config):
-        embedding = np.random.randn(64).astype(np.float32)
+        features_flat = np.random.randn(10 * 17).astype(np.float32)
         regime = np.array([1, 0, 0, 0], dtype=np.float32)
         obs = ForexTradingEnv.build_observation(
-            embedding, regime, 0.01, 0.0, 0.15,
+            features_flat, regime, 0.01, 0.0, 0.15,
+            has_position=1.0, hold_time_norm=0.5,
+            recent_wr=0.6, drawdown=0.02,
         )
-        assert obs.shape == (64 + 4 + 3,)
+        assert obs.shape == (10 * 17 + 4 + 7,)
 
 
 class TestCircuitBreaker:

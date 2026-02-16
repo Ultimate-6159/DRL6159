@@ -72,7 +72,13 @@ class ApexPredator:
 
         # ── Layer 2: Brain ──────────────────────
         self.regime_classifier = RegimeClassifier(config.regime)
-        self.drl_agent = DRLAgent(config.drl, config.perception, config.reward)
+        self._feature_dim = len(config.features.features)  # 17
+        self._lookback = 10  # Must match training BacktestEnv
+        self.drl_agent = DRLAgent(
+            config.drl, config.perception, config.reward,
+            feature_dim=self._feature_dim,
+            lookback=self._lookback,
+        )
         self.reward_calc = RewardCalculator(config.reward)
 
         # ── Layer 3: Shield ─────────────────────
@@ -89,6 +95,8 @@ class ApexPredator:
         # ── State Tracking ──────────────────────
         self._initial_equity = 0.0
         self._last_observation: Optional[np.ndarray] = None
+        self._recent_wins = 0
+        self._recent_trades = 0
 
     # ═══════════════════════════════════════════
     # LIFECYCLE
@@ -247,7 +255,18 @@ class ApexPredator:
                     time.sleep(5)
                     continue
 
-                # ── Step 5: Perception Encoding ─
+                # ── Step 5: Build Raw-Feature Observation ─
+                # Use last `lookback` rows of raw features (matching BacktestEnv)
+                feat_lookback = features[-self._lookback:] if len(features) >= self._lookback else features
+                if len(feat_lookback) < self._lookback:
+                    pad = np.zeros(
+                        (self._lookback - len(feat_lookback), self._feature_dim),
+                        dtype=np.float32,
+                    )
+                    feat_lookback = np.vstack([pad, feat_lookback])
+                features_flat = feat_lookback.flatten().astype(np.float32)
+
+                # Perception encoding for memory recall only
                 embedding = self.perception.encode(features)
 
                 # ── Step 6: Memory Recall ───────
@@ -258,14 +277,27 @@ class ApexPredator:
                 balance_norm = (equity / self._initial_equity) - 1.0
                 positions = self.connector.get_open_positions()
                 pnl_norm = sum(p["profit"] for p in positions) / max(equity, 1.0)
-                spread_norm = spread / 10.0  # Normalize spread
+                spread_norm = spread / 100.0  # Match BacktestEnv normalization
+
+                has_position = 1.0 if len(positions) > 0 else 0.0
+                hold_time_norm = 0.0
+                if positions:
+                    hold_secs = (datetime.now() - positions[0]["time"]).total_seconds()
+                    hold_time_norm = hold_secs / (self.config.reward.max_hold_steps * 60)
+
+                recent_wr = self._recent_wins / max(self._recent_trades, 1)
+                dd = max(0.0, (self._initial_equity - equity) / max(self._initial_equity, 1.0))
 
                 observation = ForexTradingEnv.build_observation(
-                    perception_embedding=embedding,
+                    features_flat=features_flat,
                     regime_one_hot=regime_one_hot,
                     balance_norm=balance_norm,
                     pnl_norm=pnl_norm,
                     spread_norm=spread_norm,
+                    has_position=has_position,
+                    hold_time_norm=hold_time_norm,
+                    recent_wr=recent_wr,
+                    drawdown=dd,
                 )
 
                 # ── Step 8: Agent Decision ──────
@@ -376,6 +408,11 @@ class ApexPredator:
 
     def _on_trade_closed(self, pnl: float, observation: np.ndarray):
         """Handle post-trade cleanup and learning."""
+        # Track win rate for observation building
+        self._recent_trades += 1
+        if pnl > 0:
+            self._recent_wins += 1
+
         # Record in systems
         self.risk_manager.record_trade_result(pnl)
         self.circuit_breaker.record_trade(pnl)
