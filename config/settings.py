@@ -62,7 +62,9 @@ class FeatureConfig:
     features: List[str] = field(default_factory=lambda: [
         "close", "high", "low", "volume",
         "spread", "atr", "returns", "z_score",
-        "volatility", "momentum", "rsi_raw"
+        "volatility", "momentum", "rsi_raw",
+        "ema_cross", "macd_signal", "bb_position",
+        "price_change_3", "high_low_ratio", "body_ratio",
     ])
 
 
@@ -89,7 +91,7 @@ class RegimeConfig:
 @dataclass
 class PerceptionConfig:
     """LSTM / Transformer neural network settings."""
-    input_dim: int = 11                  # Number of input features
+    input_dim: int = 17                  # Number of input features (11 base + 6 scalping)
     hidden_dim: int = 128                # LSTM hidden state size
     num_layers: int = 2                  # Number of LSTM layers
     dropout: float = 0.2                 # Dropout rate
@@ -107,17 +109,17 @@ class PerceptionConfig:
 class DRLConfig:
     """PPO / SAC reinforcement learning settings."""
     algorithm: str = "PPO"               # "PPO" or "SAC"
-    learning_rate: float = 3e-4          # Optimizer learning rate
+    learning_rate: float = 1e-4          # Slower LR → more stable
     gamma: float = 0.99                  # Discount factor
     gae_lambda: float = 0.95            # GAE lambda
     clip_range: float = 0.2             # PPO clip range
-    n_steps: int = 2048                  # Steps per update
-    batch_size: int = 64                 # Mini-batch size
-    n_epochs: int = 10                   # PPO epochs per update
-    ent_coef: float = 0.001             # Entropy coefficient (low = less random)
+    n_steps: int = 4096                  # More experience per update
+    batch_size: int = 128                # Larger batch → lower variance
+    n_epochs: int = 15                   # More learning per update
+    ent_coef: float = 0.005             # More exploration early on
     vf_coef: float = 0.5                # Value function coefficient
     max_grad_norm: float = 0.5          # Gradient clipping
-    total_timesteps: int = 1_000_000     # Total training timesteps
+    total_timesteps: int = 2_000_000     # Train longer for better convergence
     model_save_path: str = "models/"     # Model checkpoint directory
     tensorboard_log: str = "logs/tb/"    # TensorBoard log directory
 
@@ -131,9 +133,9 @@ class RewardConfig:
     """Reward function parameters (Sharpe-based)."""
     profit_reward: float = 1.0           # Reward per pip profit
     loss_penalty: float = -2.0           # Penalty per pip loss
-    hold_penalty: float = -0.1           # Penalty per step while holding
-    max_hold_steps: int = 120            # Force close after N bars
-    drawdown_penalty: float = -5.0       # Extra penalty for deep drawdown
+    hold_penalty: float = -0.05          # Light hold penalty (scalping already short)
+    max_hold_steps: int = 60             # Force close faster (scalping)
+    drawdown_penalty: float = -3.0       # Moderate drawdown penalty
     sharpe_window: int = 50              # Rolling window for Sharpe calc
     risk_free_rate: float = 0.0          # Risk-free rate for Sharpe
     optimal_close_bonus: float = 0.5     # Bonus for closing at good R:R
@@ -152,8 +154,8 @@ class RiskConfig:
     max_concurrent_trades: int = 3       # Max open positions
     max_lot_size: float = 1.0            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
-    atr_multiplier: float = 1.0          # SL = ATR * multiplier (tight for scalping)
-    tp_ratio: float = 1.5               # TP = SL * ratio (1:1.5 — easier to hit)
+    atr_multiplier: float = 0.8          # Tight SL = ATR * 0.8 (scalping)
+    tp_ratio: float = 1.2               # TP = SL * 1.2 (easier to hit → more wins)
 
 
 # ──────────────────────────────────────────────
@@ -166,7 +168,7 @@ class CircuitBreakerConfig:
     max_consecutive_losses: int = 5      # Halt after N consecutive losses
     cooldown_minutes: int = 60           # Cooldown period after halt
     drawdown_halt_pct: float = 0.10      # Halt if drawdown reaches 10%
-    max_daily_trades: int = 50           # Max trades per day
+    max_daily_trades: int = 200          # High-frequency: allow many trades
     spread_spike_multiplier: float = 3.0 # Halt if spread > 3x normal
 
 

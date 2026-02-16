@@ -82,6 +82,34 @@ class FeatureEngine:
         # ── RSI (Raw — not bounded 0-100) ───────
         features["rsi_raw"] = self._compute_rsi(df["close"], self.config.atr_period)
 
+        # ── EMA Crossover (5/20) ────────────────
+        ema5 = df["close"].ewm(span=5, adjust=False).mean()
+        ema20 = df["close"].ewm(span=20, adjust=False).mean()
+        features["ema_cross"] = (ema5 - ema20) / (df["close"] + 1e-10)
+
+        # ── MACD Signal ─────────────────────────
+        ema12 = df["close"].ewm(span=12, adjust=False).mean()
+        ema26 = df["close"].ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        features["macd_signal"] = (macd_line - signal_line) / (df["close"] + 1e-10)
+
+        # ── Bollinger Band Position ──────────────
+        bb_mid = df["close"].rolling(window=20).mean()
+        bb_std = df["close"].rolling(window=20).std()
+        bb_upper = bb_mid + 2 * bb_std
+        bb_lower = bb_mid - 2 * bb_std
+        features["bb_position"] = (df["close"] - bb_lower) / (bb_upper - bb_lower + 1e-10)
+
+        # ── 3-bar Price Change ───────────────────
+        features["price_change_3"] = df["close"].pct_change(3)
+
+        # ── High-Low Ratio (bar volatility) ──────
+        features["high_low_ratio"] = (df["high"] - df["low"]) / (df["close"] + 1e-10)
+
+        # ── Body Ratio (candle strength) ─────────
+        features["body_ratio"] = (df["close"] - df["open"]) / (df["high"] - df["low"] + 1e-10)
+
         # ── Drop NaN rows (from rolling calculations)
         features = features.dropna().reset_index(drop=True)
 

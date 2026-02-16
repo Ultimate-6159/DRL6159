@@ -1,11 +1,11 @@
 """
 Apex Predator — Backtesting Gymnasium Environment
 ====================================================
-Replays historical OHLC data and simulates realistic trading
-with spread, slippage, and PnL calculation for DRL training.
-
-Uses RAW FEATURES as observations (not LSTM embeddings) so PPO
-can learn directly from market data without a pre-trained encoder.
+High-frequency scalping environment with:
+- Trailing stop logic (lock profits)
+- Expectancy-based reward function
+- Smart inactivity penalty (miss-opportunity based)
+- Dynamic position sizing for $500–$5M portfolios
 """
 
 import logging
@@ -26,14 +26,14 @@ logger = logging.getLogger("apex_predator.backtest_env")
 
 class BacktestEnv(gym.Env):
     """
-    Gymnasium environment that replays historical bars
-    for DRL training with realistic trading simulation.
+    Gymnasium environment for DRL scalping training.
 
     Observation Space (raw features — NOT LSTM):
         - Last `lookback` bars of normalized features, flattened
         - Regime one-hot (4-dim)
-        - Account state (5-dim)
-        Total: lookback * feature_dim + 4 + 5
+        - Account state (7-dim): balance, pnl, spread, has_position,
+          hold_time, win_rate_recent, drawdown
+        Total: lookback * feature_dim + 4 + 7
 
     Action Space:
         Discrete(3): BUY=0, SELL=1, HOLD=2
@@ -54,9 +54,9 @@ class BacktestEnv(gym.Env):
         lot_size: float = 0.01,
         contract_size: float = 100.0,
         point_value: float = 0.01,
-        max_hold_bars: int = 120,
-        sl_atr_mult: float = 1.5,
-        tp_atr_mult: float = 3.0,
+        max_hold_bars: int = 60,
+        sl_atr_mult: float = 0.8,
+        tp_atr_mult: float = 0.96,
     ):
         """
         Args:
@@ -97,7 +97,7 @@ class BacktestEnv(gym.Env):
         # Observation dimensions
         self.feature_dim = features.shape[1]
         n_regimes = 4
-        n_account = 5  # balance, pnl, spread, has_position, hold_time
+        n_account = 7  # balance, pnl, spread, has_position, hold_time, win_rate, drawdown
         obs_dim = lookback * self.feature_dim + n_regimes + n_account
 
         self.observation_space = spaces.Box(
@@ -110,7 +110,7 @@ class BacktestEnv(gym.Env):
         self.end_idx = len(bars) - 1
         self.max_steps = self.end_idx - self.start_idx
 
-        logger.info("BacktestEnv: obs_dim=%d (features=%d x %d + regime=4 + account=5)",
+        logger.info("BacktestEnv: obs_dim=%d (features=%d x %d + regime=4 + account=7)",
                      obs_dim, lookback, self.feature_dim)
         logger.info("BacktestEnv: %d bars, %d tradeable steps",
                      len(bars), self.max_steps)
@@ -131,6 +131,10 @@ class BacktestEnv(gym.Env):
         self.hold_bars = 0
         self.bars_without_trade = 0
         self._returns_buffer = []
+        self._recent_wins = 0
+        self._recent_trades = 0
+        self._consecutive_wins = 0
+        self._consecutive_losses = 0
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -166,6 +170,9 @@ class BacktestEnv(gym.Env):
             price_diff = (close - entry) * direction
             unrealized_pnl = price_diff * self.lot_size * self.contract_size
 
+            # ── Trailing Stop Logic ──────────────
+            self._update_trailing_stop(close, atr)
+
             # Check SL/TP
             sl = self.position["sl"]
             tp = self.position["tp"]
@@ -197,8 +204,8 @@ class BacktestEnv(gym.Env):
                 info["event"] = "FORCE_CLOSE"
 
             else:
-                # Still holding — small time-based cost
-                reward = -0.005 * (self.hold_bars / self.max_hold_bars)
+                # Still holding — very light time-based cost
+                reward = -0.003 * (self.hold_bars / self.max_hold_bars)
 
             # After close, agent can open new position
             if self.position is None and action != TradeAction.HOLD.value:
@@ -207,9 +214,10 @@ class BacktestEnv(gym.Env):
         else:
             # ── No position ────────────────────
             if action == TradeAction.HOLD.value:
-                # Growing inactivity penalty
+                # Smart inactivity penalty — based on volatility
                 self.bars_without_trade += 1
-                penalty = min(self.bars_without_trade / 100.0, 1.0) * 0.02
+                vol_factor = min(atr / (close * 0.001 + 1e-10), 2.0)
+                penalty = min(self.bars_without_trade / 200.0, 0.5) * 0.01 * vol_factor
                 reward = -penalty
             else:
                 self.bars_without_trade = 0
@@ -265,60 +273,119 @@ class BacktestEnv(gym.Env):
             "sl": sl,
             "tp": tp,
             "open_step": self.current_step,
+            "best_price": entry,         # For trailing stop
+            "trailing_active": False,     # Trailing activated flag
         }
         self.hold_bars = 0
-        return -0.01  # Small friction
+        return -0.005  # Small friction
+
+    def _update_trailing_stop(self, close, atr):
+        """
+        Trailing stop logic:
+        1. When profit >= 0.4 * ATR → move SL to breakeven
+        2. When profit >= 0.8 * ATR → trail SL behind best price
+        """
+        if self.position is None:
+            return
+
+        direction = self.position["direction"]
+        entry = self.position["entry"]
+        price_diff = (close - entry) * direction
+
+        # Update best price
+        if direction == 1:
+            self.position["best_price"] = max(self.position["best_price"], close)
+        else:
+            self.position["best_price"] = min(self.position["best_price"], close)
+
+        # Phase 1: Move to breakeven
+        if price_diff >= atr * 0.4 and not self.position["trailing_active"]:
+            if direction == 1:
+                new_sl = max(self.position["sl"], entry + atr * 0.05)
+            else:
+                new_sl = min(self.position["sl"], entry - atr * 0.05)
+            self.position["sl"] = new_sl
+
+        # Phase 2: Trail behind best price
+        if price_diff >= atr * 0.8:
+            self.position["trailing_active"] = True
+            trail_dist = atr * 0.4
+            if direction == 1:
+                trail_sl = self.position["best_price"] - trail_dist
+                self.position["sl"] = max(self.position["sl"], trail_sl)
+            else:
+                trail_sl = self.position["best_price"] + trail_dist
+                self.position["sl"] = min(self.position["sl"], trail_sl)
 
     def _close_position(self, pnl):
         self.balance += pnl
         self.total_pnl += pnl
         self.total_trades += 1
+        self._recent_trades += 1
+
         if pnl > 0:
             self.wins += 1
+            self._recent_wins += 1
+            self._consecutive_wins += 1
+            self._consecutive_losses = 0
         else:
             self.losses += 1
+            self._consecutive_losses += 1
+            self._consecutive_wins = 0
+
         self._returns_buffer.append(pnl)
         self.position = None
         self.hold_bars = 0
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        Reward shaping for HIGH ACCURACY HFT:
-        - Win → BIG reward (+2.0 base) — encourages precision
-        - Loss → HARSH penalty (-2.0 base) — forces selectivity
-        - TP hit → extra bonus
-        - Win streak → escalating bonus
+        Expectancy-based reward for high-frequency scalping:
+        - Win → proportional reward + TP bonus + streak bonus
+        - Loss → moderate penalty (don't over-punish → agent still trades)
+        - Force close → extra penalty (should cut earlier)
+        - Drawdown → soft penalty above 5%
         """
         pnl_norm = pnl / self.initial_balance * 100
 
         if pnl >= 0:
-            reward = pnl_norm * 2.0
-            reward += 2.0  # Strong win bonus
+            # Win: base bonus + proportional reward
+            reward = 1.0 + pnl_norm * 3.0
+
             if event_type == "TP":
-                reward += 1.0  # TP bonus
+                reward += 2.0  # Strong TP bonus
 
-            # Win streak bonus
-            recent = self._returns_buffer[-5:] if len(self._returns_buffer) >= 5 else self._returns_buffer
-            if len(recent) > 0:
-                streak = sum(1 for r in reversed(recent) if r > 0)
-                reward += streak * 0.3  # Escalating streak bonus
+            # Win streak escalation
+            reward += min(self._consecutive_wins, 5) * 0.3
+
+            # Profitable consistency bonus
+            if self._recent_trades >= 10:
+                recent_wr = self._recent_wins / self._recent_trades
+                if recent_wr >= 0.5:
+                    reward += 0.5  # Consistency bonus
         else:
-            reward = pnl_norm * 1.5  # Amplify loss pain
-            reward -= 2.0  # Strong loss penalty
+            # Loss: moderate penalty
+            reward = -0.5 + pnl_norm * 1.5
+
             if event_type == "SL":
-                reward -= 0.5  # Extra SL penalty
+                reward -= 0.3  # SL hit is acceptable (controlled loss)
+            elif event_type == "FORCE":
+                reward -= 1.5  # Force close = bad (should have closed earlier)
 
-        # Drawdown penalty
+            # Consecutive loss penalty
+            if self._consecutive_losses >= 3:
+                reward -= 0.5 * (self._consecutive_losses - 2)
+
+        # Drawdown penalty — soft, above 5%
         dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
-        if dd > 0.03:
-            reward -= dd * 3.0
+        if dd > 0.05:
+            reward -= dd * 2.0
 
-        return float(np.clip(reward, -8.0, 10.0))
+        return float(np.clip(reward, -6.0, 12.0))
 
     def _get_observation(self):
         """
         Build observation from RAW features.
-        Much more informative than untrained LSTM embeddings.
+        Enhanced with win rate and drawdown signals.
         """
         idx = self.current_step
 
@@ -338,7 +405,7 @@ class BacktestEnv(gym.Env):
         regime_oh = np.zeros(4, dtype=np.float32)
         regime_oh[min(regime_idx, 3)] = 1.0
 
-        # ── Account state ───────────────────
+        # ── Account state (7-dim) ───────────
         balance_norm = (self.equity / self.initial_balance) - 1.0
 
         pnl_norm = 0.0
@@ -354,9 +421,17 @@ class BacktestEnv(gym.Env):
 
         spread_norm = self.spreads[idx] / 100.0 if idx < len(self.spreads) else 0.0
 
+        # Recent win rate (new signal)
+        recent_wr = self._recent_wins / max(self._recent_trades, 1)
+
+        # Current drawdown (new signal)
+        dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
+
         account = np.array([
             balance_norm, pnl_norm, spread_norm,
             has_position, hold_time_norm,
+            recent_wr,     # New: agent knows its own performance
+            dd,            # New: agent knows drawdown state
         ], dtype=np.float32)
 
         return np.concatenate([features_flat, regime_oh, account])
@@ -378,3 +453,35 @@ class BacktestEnv(gym.Env):
             "max_drawdown": (self.peak_equity - self.equity) / max(self.peak_equity, 1),
             "sharpe_ratio": sharpe,
         }
+
+    # ── Portfolio Scaling Helper ──────────────────
+    @staticmethod
+    def calculate_lot_size(balance, risk_pct=0.01, sl_pips=10.0, pip_value=1.0):
+        """
+        Calculate lot size based on portfolio size and risk %.
+        Scales from $500 micro accounts to $5M institutional.
+
+        Args:
+            balance: Account balance in USD
+            risk_pct: Max risk per trade (0.01 = 1%)
+            sl_pips: Stop-loss distance in pips
+            pip_value: Dollar value per pip per lot
+
+        Returns:
+            Lot size (capped: 0.01 – 100.0)
+        """
+        # Adaptive risk based on account size
+        if balance < 1_000:
+            risk_pct = min(risk_pct, 0.005)   # 0.5% for micro accounts
+        elif balance < 10_000:
+            risk_pct = min(risk_pct, 0.01)    # 1% for small
+        elif balance < 100_000:
+            risk_pct = min(risk_pct, 0.01)    # 1% for medium
+        elif balance < 1_000_000:
+            risk_pct = min(risk_pct, 0.005)   # 0.5% for large
+        else:
+            risk_pct = min(risk_pct, 0.003)   # 0.3% for institutional
+
+        risk_amount = balance * risk_pct
+        lot = risk_amount / max(sl_pips * pip_value, 0.01)
+        return max(0.01, min(lot, 100.0))

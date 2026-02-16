@@ -190,7 +190,7 @@ def train_model(env: BacktestEnv, config: ApexConfig, total_timesteps: int):
     # Note: tensorboard_log=None to avoid requiring tensorboard package
     # Use a larger network for better pattern recognition
     policy_kwargs = dict(
-        net_arch=dict(pi=[256, 256], vf=[256, 256]),
+        net_arch=dict(pi=[512, 256, 128], vf=[512, 256, 128]),
     )
 
     model = PPO(
@@ -291,10 +291,10 @@ Examples:
   python train.py --symbol XAUUSDm --tf M5 # Gold on M5
         """,
     )
-    parser.add_argument("--bars", type=int, default=10000,
-                        help="Number of historical bars to download (default: 10000)")
-    parser.add_argument("--timesteps", type=int, default=100000,
-                        help="Training timesteps (default: 100000)")
+    parser.add_argument("--bars", type=int, default=50000,
+                        help="Number of historical bars to download (default: 50000)")
+    parser.add_argument("--timesteps", type=int, default=2000000,
+                        help="Training timesteps (default: 2000000)")
     parser.add_argument("--symbol", type=str, default=None,
                         help="Symbol to train on (overrides settings.py)")
     parser.add_argument("--tf", type=str, default=None,
