@@ -1,0 +1,48 @@
+# ── Python ──────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ── Virtual Environment ────────────────────
+.venv/
+venv/
+env/
+
+# ── IDE ─────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── Logs ────────────────────────────────────
+logs/
+*.log
+
+# ── Models & Data (large files) ────────────
+models/
+*.zip
+*.pt
+*.pth
+data/
+
+# ── Tensorboard ─────────────────────────────
+tb_logs/
+runs/
+
+# ── Memory Store ────────────────────────────
+memory_store/
+
+# ── OS ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Secrets (NEVER commit!) ─────────────────
+# config/settings.py contains credentials
+# Make sure to update credentials on VPS!
