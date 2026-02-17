@@ -298,10 +298,10 @@ class ApexPredator:
 
                 # Skip trading in uncertain regime
                 if regime == MarketRegime.UNCERTAIN and regime_conf > 0.5:
-                    if self._loop_count % 60 == 0:
+                    if self._loop_count % 10 == 0:
                         self.logger.info(
-                            "Regime: UNCERTAIN (conf=%.2f) — holding cash",
-                            regime_conf,
+                            "WAITING | Regime: UNCERTAIN (conf=%.2f) — holding cash | Loop: %d",
+                            regime_conf, self._loop_count,
                         )
                     time.sleep(5)
                     continue
@@ -360,11 +360,11 @@ class ApexPredator:
                 if action != TradeAction.HOLD:
                     action = self._apply_trend_filter(action, full_buffer)
 
-                # Diagnostic logging every 60 loops
-                if self._loop_count % 60 == 0:
+                # Diagnostic logging every 10 loops (more frequent for monitoring)
+                if self._loop_count % 10 == 0:
                     self.logger.info(
-                        "DIAG | Loop: %d | Model: %s (conf=%.2f) | After TrendFilter: %s | Spread: %.1f",
-                        self._loop_count, raw_action.name, confidence, action.name, spread,
+                        "DIAG | Loop: %d | Model: %s (conf=%.2f) | After TrendFilter: %s | Spread: %.1f | Regime: %s",
+                        self._loop_count, raw_action.name, confidence, action.name, spread, regime.value,
                     )
 
                 # ── Step 9: Risk Evaluation ─────
