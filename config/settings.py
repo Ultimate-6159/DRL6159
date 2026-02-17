@@ -174,7 +174,7 @@ class CircuitBreakerConfig:
     cooldown_minutes: int = 30           # Cooldown period after halt
     drawdown_halt_pct: float = 0.05      # Halt if drawdown reaches 5%
     max_daily_trades: int = 100          # Limit daily trades
-    spread_spike_multiplier: float = 2.0 # Halt if spread > 2x normal
+    spread_spike_multiplier: float = 3.0 # Halt if spread > 3x normal (XAUUSDm spreads vary more)
 
 
 # ??????????????????????????????????????????????
