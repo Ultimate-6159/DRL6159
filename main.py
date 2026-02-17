@@ -142,9 +142,22 @@ class ApexPredator:
         account = self.connector.get_account_info()
         self._initial_equity = account.get("equity", 10000.0)
         self.risk_manager.set_initial_balance(self._initial_equity)
+
+        # Use sensible default spread for XAUUSDm (Gold) if current spread is abnormal
+        current_spread = self.data_feed.get_spread()
+        default_spread = 25.0  # Normal spread for XAUUSDm is ~15-30 points
+        if current_spread > default_spread * 3:  # If spread > 75, probably market issue
+            self.logger.warning(
+                "Current spread %.1f is abnormally high, using default %.1f as baseline",
+                current_spread, default_spread
+            )
+            normal_spread = default_spread
+        else:
+            normal_spread = current_spread if current_spread > 0 else default_spread
+
         self.circuit_breaker.set_initial_state(
             equity=self._initial_equity,
-            normal_spread=self.data_feed.get_spread(),
+            normal_spread=normal_spread,
         )
 
         # Check for existing positions from previous session

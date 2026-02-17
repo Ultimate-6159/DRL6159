@@ -114,11 +114,20 @@ class DataFeed:
         return None
 
     def get_spread(self) -> float:
-        """Get current spread from latest tick or buffer."""
+        """Get current spread from latest tick (preferred) or buffer."""
+        # First priority: tick buffer (real-time spread)
         if self._tick_buffer:
             return self._tick_buffer[-1].spread
+
+        # Second priority: fetch fresh tick from MT5
+        tick = self.connector.get_tick()
+        if tick is not None:
+            return tick.spread
+
+        # Last resort: OHLC spread (may be max spread in bar, not current)
         if self._buffer is not None and "spread" in self._buffer.columns:
             return float(self._buffer["spread"].iloc[-1])
+
         return 0.0
 
     def get_buffer_size(self) -> int:
