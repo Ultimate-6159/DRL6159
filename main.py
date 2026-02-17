@@ -147,6 +147,9 @@ class ApexPredator:
             normal_spread=self.data_feed.get_spread(),
         )
 
+        # Check for existing positions from previous session
+        self._handle_existing_positions()
+
         # Initialize DRL agent
         self.drl_agent.initialize()
 
@@ -163,6 +166,38 @@ class ApexPredator:
             self._initial_equity, self.memory.size(),
         )
         return True
+
+    def _handle_existing_positions(self):
+        """Check and handle positions that exist from previous sessions."""
+        existing_positions = self.connector.get_open_positions()
+
+        if not existing_positions:
+            self.logger.info("No existing positions found")
+            return
+
+        self.logger.warning(
+            "Found %d existing position(s) from previous session:",
+            len(existing_positions)
+        )
+
+        for pos in existing_positions:
+            self.logger.warning(
+                "  - Ticket #%d | %s | %.2f lots @ %.5f | PnL: $%.2f | Open since: %s",
+                pos["ticket"], pos["type"], pos["volume"], 
+                pos["price_open"], pos["profit"], pos["time"]
+            )
+
+        # Close existing positions to start fresh (optional: can be configured)
+        if self.config.dry_run:
+            self.logger.info("Dry run mode — keeping existing positions for monitoring")
+        else:
+            self.logger.warning("Closing existing positions to start fresh...")
+            for pos in existing_positions:
+                result = self.connector.close_position(pos["ticket"])
+                if result.success:
+                    self.logger.info("Closed position #%d", pos["ticket"])
+                else:
+                    self.logger.error("Failed to close position #%d", pos["ticket"])
 
     def shutdown(self):
         """Graceful shutdown — save state and disconnect."""
@@ -323,6 +358,12 @@ class ApexPredator:
                     current_price = self.data_feed.get_latest_price() or 0.0
                     symbol_info = self.connector.get_symbol_info()
 
+                    # Debug: Log position count before risk evaluation
+                    self.logger.debug(
+                        "DEBUG | Positions from MT5: %d | Details: %s",
+                        len(positions), [p["ticket"] for p in positions] if positions else "None"
+                    )
+
                     proposal = self.risk_manager.evaluate_trade(
                         action=action,
                         current_price=current_price,
@@ -338,8 +379,8 @@ class ApexPredator:
                         self._execute_trade(action, proposal, observation, embedding, regime)
                     else:
                         self.logger.info(
-                            "Trade REJECTED: %s | Reason: %s",
-                            action.name, proposal.reason,
+                            "Trade REJECTED: %s | Reason: %s | OpenPos: %d",
+                            action.name, proposal.reason, len(positions),
                         )
 
                 # ── Step 10: Manage Open Positions
