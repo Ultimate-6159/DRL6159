@@ -43,6 +43,7 @@ class VectorMemory:
         self._metadata: List[dict] = []
         self._faiss_index = None
         self._use_faiss = False
+        self._stores_since_save: int = 0
 
         os.makedirs(config.persist_path, exist_ok=True)
         self._init_faiss()
@@ -100,7 +101,13 @@ class VectorMemory:
         if len(self._embeddings) > self.config.max_memories:
             self._trim()
 
-    # ── Recall ──────────────────────────────────
+        # Auto-save every N stores
+        self._stores_since_save += 1
+        if self._stores_since_save >= self.config.auto_save_interval:
+            self.save()
+            self._stores_since_save = 0
+
+    # ── Recall
 
     def recall(
         self,

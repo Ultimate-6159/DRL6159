@@ -347,6 +347,10 @@ class ApexPredator:
                 if self._loop_count % 300 == 0:
                     self._log_heartbeat(equity, regime, regime_conf)
 
+                # ── Periodic Auto-Save ──────────
+                if self._loop_count % 1200 == 0 and self._loop_count > 0:
+                    self._auto_save()
+
                 # Save last observation
                 self._last_observation = observation
 
@@ -523,6 +527,15 @@ class ApexPredator:
     # ═══════════════════════════════════════════
     # HEARTBEAT & STATUS
     # ═══════════════════════════════════════════
+
+    def _auto_save(self):
+        """Periodic save of memory and model to prevent data loss."""
+        try:
+            self.memory.save()
+            self.drl_agent.save()
+            self.logger.info("Auto-save completed (loop %d)", self._loop_count)
+        except Exception as e:
+            self.logger.error("Auto-save failed: %s", e)
 
     def _log_heartbeat(self, equity, regime, regime_conf):
         """Periodic status log."""
