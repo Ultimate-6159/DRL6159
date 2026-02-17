@@ -109,19 +109,19 @@ class PerceptionConfig:
 class DRLConfig:
     """PPO / SAC reinforcement learning settings."""
     algorithm: str = "PPO"               # "PPO" or "SAC"
-    learning_rate: float = 3e-5          # Reduced 3x from 1e-4 → stability
+    learning_rate: float = 1e-5          # Very low LR → stable learning
     gamma: float = 0.99                  # Discount factor
     gae_lambda: float = 0.95            # GAE lambda
-    clip_range: float = 0.15            # Slightly wider for exploration
+    clip_range: float = 0.10            # Tighter clip → conservative updates
     n_steps: int = 4096                  # More experience per update
-    batch_size: int = 128                # Larger batch → lower variance
-    n_epochs: int = 10                   # Reduced from 15 → less KL divergence
-    ent_coef: float = 0.02              # 4x higher → prevent entropy collapse
+    batch_size: int = 256                # Larger batch → lower variance
+    n_epochs: int = 8                    # Fewer epochs → less overfitting
+    ent_coef: float = 0.05              # Higher entropy → explore more before committing
     vf_coef: float = 0.5                # Value function coefficient
     max_grad_norm: float = 0.3          # Tighter clipping → smoother updates
-    target_kl: float = 0.015            # Early-stop epoch if KL exceeds this
+    target_kl: float = 0.01             # Tighter KL → more conservative
     normalize_advantage: bool = True     # Normalize advantages for stability
-    total_timesteps: int = 2_000_000     # Train longer for better convergence
+    total_timesteps: int = 3_000_000     # Train longer for better convergence
     model_save_path: str = "models/"     # Model checkpoint directory
     tensorboard_log: str = "logs/tb/"    # TensorBoard log directory
 
@@ -133,14 +133,14 @@ class DRLConfig:
 @dataclass
 class RewardConfig:
     """Reward function parameters (Sharpe-based)."""
-    profit_reward: float = 1.0           # Reward per pip profit
-    loss_penalty: float = -2.0           # Penalty per pip loss
-    hold_penalty: float = -0.05          # Light hold penalty (scalping already short)
-    max_hold_steps: int = 60             # Force close faster (scalping)
-    drawdown_penalty: float = -3.0       # Moderate drawdown penalty
+    profit_reward: float = 2.0           # Reward per pip profit (bigger carrot)
+    loss_penalty: float = -4.0           # Penalty per pip loss (bigger stick)
+    hold_penalty: float = -0.001         # Near-zero hold penalty → HOLD is OK
+    max_hold_steps: int = 30             # Force close faster (scalping)
+    drawdown_penalty: float = -5.0       # Harsh drawdown penalty
     sharpe_window: int = 50              # Rolling window for Sharpe calc
     risk_free_rate: float = 0.0          # Risk-free rate for Sharpe
-    optimal_close_bonus: float = 0.5     # Bonus for closing at good R:R
+    optimal_close_bonus: float = 1.0     # Bigger bonus for closing at good R:R
 
 
 # ──────────────────────────────────────────────
@@ -150,14 +150,14 @@ class RewardConfig:
 @dataclass
 class RiskConfig:
     """Hard-coded risk management parameters (NO AI — pure math)."""
-    max_risk_per_trade: float = 0.01     # Max 1% risk per trade
-    max_daily_loss: float = 0.05         # Max 5% daily drawdown
-    max_total_drawdown: float = 0.15     # Max 15% total drawdown -> halt
-    max_concurrent_trades: int = 3       # Max open positions
-    max_lot_size: float = 1.0            # Absolute max lot size
+    max_risk_per_trade: float = 0.005    # Max 0.5% risk per trade (conservative)
+    max_daily_loss: float = 0.03         # Max 3% daily drawdown
+    max_total_drawdown: float = 0.10     # Max 10% total drawdown -> halt
+    max_concurrent_trades: int = 1       # SINGLE position only → avoid stacking losses
+    max_lot_size: float = 0.5            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
-    atr_multiplier: float = 0.8          # Tight SL = ATR * 0.8 (scalping)
-    tp_ratio: float = 1.2               # TP = SL * 1.2 (easier to hit → more wins)
+    atr_multiplier: float = 0.5          # Tighter SL = ATR * 0.5 (scalping)
+    tp_ratio: float = 2.5               # TP = SL * 2.5 → asymmetric R:R favoring wins
 
 
 # ──────────────────────────────────────────────
@@ -167,11 +167,11 @@ class RiskConfig:
 @dataclass
 class CircuitBreakerConfig:
     """Emergency stop parameters."""
-    max_consecutive_losses: int = 5      # Halt after N consecutive losses
-    cooldown_minutes: int = 60           # Cooldown period after halt
-    drawdown_halt_pct: float = 0.10      # Halt if drawdown reaches 10%
-    max_daily_trades: int = 200          # High-frequency: allow many trades
-    spread_spike_multiplier: float = 3.0 # Halt if spread > 3x normal
+    max_consecutive_losses: int = 3      # Halt after 3 consecutive losses
+    cooldown_minutes: int = 30           # Cooldown period after halt
+    drawdown_halt_pct: float = 0.05      # Halt if drawdown reaches 5%
+    max_daily_trades: int = 100          # Limit daily trades
+    spread_spike_multiplier: float = 2.0 # Halt if spread > 2x normal
 
 
 # ──────────────────────────────────────────────

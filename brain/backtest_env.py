@@ -54,9 +54,9 @@ class BacktestEnv(gym.Env):
         lot_size: float = 0.01,
         contract_size: float = 100.0,
         point_value: float = 0.01,
-        max_hold_bars: int = 60,
-        sl_atr_mult: float = 0.8,
-        tp_atr_mult: float = 0.96,
+        max_hold_bars: int = 30,
+        sl_atr_mult: float = 0.5,
+        tp_atr_mult: float = 1.25,
     ):
         """
         Args:
@@ -214,11 +214,12 @@ class BacktestEnv(gym.Env):
         else:
             # ── No position ────────────────────
             if action == TradeAction.HOLD.value:
-                # Smart inactivity penalty — based on volatility
+                # Minimal inactivity penalty — HOLD is a valid strategy
                 self.bars_without_trade += 1
-                vol_factor = min(atr / (close * 0.001 + 1e-10), 2.0)
-                penalty = min(self.bars_without_trade / 200.0, 0.5) * 0.01 * vol_factor
-                reward = -penalty
+                if self.bars_without_trade > 100:
+                    reward = -0.001  # Only penalize extreme inactivity
+                else:
+                    reward = 0.0  # HOLD is free → agent learns to be selective
             else:
                 self.bars_without_trade = 0
                 reward = self._open_position(action, close, spread, atr)
@@ -256,6 +257,20 @@ class BacktestEnv(gym.Env):
     def _open_position(self, action, close, spread, atr):
         direction = 1 if action == TradeAction.BUY.value else -1
 
+        # ── Trend confirmation during training ──
+        # Penalize counter-trend entries to teach selectivity
+        trend_penalty = 0.0
+        idx = self.current_step
+        if idx >= 30:
+            closes = self.bars[idx-30:idx+1, 3]  # Last 30 closes
+            ema_fast = self._simple_ema(closes, 10)
+            ema_slow = self._simple_ema(closes, 30)
+            trend_up = ema_fast > ema_slow
+            if direction == 1 and not trend_up:
+                trend_penalty = -0.3  # Buying in downtrend
+            elif direction == -1 and trend_up:
+                trend_penalty = -0.3  # Selling in uptrend
+
         spread_cost = spread * self.point_value
         entry = close + (spread_cost / 2) * direction
 
@@ -277,13 +292,23 @@ class BacktestEnv(gym.Env):
             "trailing_active": False,     # Trailing activated flag
         }
         self.hold_bars = 0
-        return -0.005  # Small friction
+        return -0.005 + trend_penalty  # Friction + trend penalty
+
+    @staticmethod
+    def _simple_ema(data, period):
+        """Fast EMA computation for training environment."""
+        alpha = 2.0 / (period + 1)
+        ema = data[0]
+        for i in range(1, len(data)):
+            ema = alpha * data[i] + (1 - alpha) * ema
+        return ema
 
     def _update_trailing_stop(self, close, atr):
         """
-        Trailing stop logic:
-        1. When profit >= 0.4 * ATR → move SL to breakeven
-        2. When profit >= 0.8 * ATR → trail SL behind best price
+        Aggressive trailing stop for high win rate:
+        1. When profit >= 0.3 * ATR → move SL to breakeven
+        2. When profit >= 0.5 * ATR → trail SL tight behind best price
+        This locks in more profits and increases win rate.
         """
         if self.position is None:
             return
@@ -298,18 +323,18 @@ class BacktestEnv(gym.Env):
         else:
             self.position["best_price"] = min(self.position["best_price"], close)
 
-        # Phase 1: Move to breakeven
-        if price_diff >= atr * 0.4 and not self.position["trailing_active"]:
+        # Phase 1: Move to breakeven early
+        if price_diff >= atr * 0.3 and not self.position["trailing_active"]:
             if direction == 1:
                 new_sl = max(self.position["sl"], entry + atr * 0.05)
             else:
                 new_sl = min(self.position["sl"], entry - atr * 0.05)
             self.position["sl"] = new_sl
 
-        # Phase 2: Trail behind best price
-        if price_diff >= atr * 0.8:
+        # Phase 2: Tight trail behind best price
+        if price_diff >= atr * 0.5:
             self.position["trailing_active"] = True
-            trail_dist = atr * 0.4
+            trail_dist = atr * 0.3  # Tighter trail → lock more profit
             if direction == 1:
                 trail_sl = self.position["best_price"] - trail_dist
                 self.position["sl"] = max(self.position["sl"], trail_sl)
@@ -339,49 +364,48 @@ class BacktestEnv(gym.Env):
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        Expectancy-based reward for high-frequency scalping.
-        Scaled down 3x from original to keep value function stable:
-        - Win → proportional reward + TP bonus + streak bonus
-        - Loss → moderate penalty (don't over-punish → agent still trades)
-        - Force close → extra penalty (should cut earlier)
-        - Drawdown → soft penalty above 5%
+        High-winrate reward function for scalping.
+        Heavily rewards TP hits and consistency.
+        Harshly punishes losses to teach selectivity.
         """
         pnl_norm = pnl / self.initial_balance * 100
 
         if pnl >= 0:
-            # Win: base bonus + proportional reward (scaled 3x down)
-            reward = 0.3 + pnl_norm * 1.0
+            # Win: strong base bonus + proportional reward
+            reward = 0.5 + pnl_norm * 1.5
 
             if event_type == "TP":
-                reward += 0.7  # TP bonus
+                reward += 1.5  # Big TP bonus → learn to let winners run
 
-            # Win streak escalation
-            reward += min(self._consecutive_wins, 5) * 0.1
+            # Win streak escalation (stronger)
+            reward += min(self._consecutive_wins, 7) * 0.15
 
-            # Profitable consistency bonus
-            if self._recent_trades >= 10:
+            # Consistency bonus: reward maintaining >70% WR
+            if self._recent_trades >= 5:
                 recent_wr = self._recent_wins / self._recent_trades
-                if recent_wr >= 0.5:
-                    reward += 0.15  # Consistency bonus
+                if recent_wr >= 0.7:
+                    reward += 0.5  # Strong bonus for >70% win rate
+                elif recent_wr >= 0.5:
+                    reward += 0.1
         else:
-            # Loss: moderate penalty (scaled down)
-            reward = -0.2 + pnl_norm * 0.5
+            # Loss: harsh penalty to teach selectivity
+            reward = -0.5 + pnl_norm * 1.0
 
             if event_type == "SL":
-                reward -= 0.1  # SL hit is acceptable (controlled loss)
+                reward -= 0.3  # SL hit is still bad
             elif event_type == "FORCE":
-                reward -= 0.5  # Force close = bad (should have closed earlier)
+                reward -= 1.0  # Force close = very bad
 
-            # Consecutive loss penalty
-            if self._consecutive_losses >= 3:
-                reward -= 0.15 * (self._consecutive_losses - 2)
+            # Consecutive loss penalty (stronger)
+            if self._consecutive_losses >= 2:
+                reward -= 0.3 * (self._consecutive_losses - 1)
 
-        # Drawdown penalty — soft, above 5%
+        # Drawdown penalty — starts at 3% DD
         dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
-        if dd > 0.05:
-            reward -= dd * 0.7
+        if dd > 0.03:
+            reward -= dd * 1.5
 
-        return float(np.clip(reward, -2.0, 4.0))
+        return float(np.clip(reward, -3.0, 5.0))
 
     def _get_observation(self):
         """

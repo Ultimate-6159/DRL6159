@@ -303,6 +303,11 @@ class ApexPredator:
                 # ── Step 8: Agent Decision ──────
                 action, confidence = self.drl_agent.predict(observation)
 
+                # ── Step 8.5: Trend Confirmation Filter ──
+                # Prevent trading against the dominant trend
+                if action != TradeAction.HOLD:
+                    action = self._apply_trend_filter(action, full_buffer)
+
                 # ── Step 9: Risk Evaluation ─────
                 if action != TradeAction.HOLD:
                     atr_values = self.feature_engine._compute_atr(full_buffer)
@@ -447,6 +452,73 @@ class ApexPredator:
             "CLOSE | PnL: $%.2f | Reward: %.3f | Sharpe: %.2f",
             pnl, reward, self.reward_calc.get_rolling_sharpe(),
         )
+
+    # ═══════════════════════════════════════════
+    # TREND FILTER — Prevent Trading Against the Trend
+    # ═══════════════════════════════════════════
+
+    def _apply_trend_filter(self, action: TradeAction, df) -> TradeAction:
+        """
+        Multi-timeframe trend confirmation using EMA crossover and momentum.
+        Only allow trades in the direction of the dominant trend.
+        Converts counter-trend trades to HOLD.
+
+        Uses:
+        - EMA 10 vs EMA 30 for short-term trend
+        - EMA 30 vs EMA 60 for medium-term trend
+        - Price momentum (last 5 bars)
+        """
+        if df is None or len(df) < 60:
+            return action
+
+        close = df["close"].values.astype(float)
+
+        # EMAs
+        ema_10 = self._ema(close, 10)
+        ema_30 = self._ema(close, 30)
+        ema_60 = self._ema(close, 60)
+
+        # Short-term trend: EMA10 vs EMA30
+        short_trend_up = ema_10[-1] > ema_30[-1]
+        # Medium-term trend: EMA30 vs EMA60
+        medium_trend_up = ema_30[-1] > ema_60[-1]
+
+        # Price momentum: last 5 bars
+        if len(close) >= 5:
+            momentum_up = close[-1] > close[-5]
+        else:
+            momentum_up = close[-1] > close[0]
+
+        # Count bullish signals (0-3)
+        bullish_score = int(short_trend_up) + int(medium_trend_up) + int(momentum_up)
+
+        if action == TradeAction.BUY:
+            # Need at least 2/3 bullish signals to buy
+            if bullish_score < 2:
+                self.logger.debug(
+                    "TREND FILTER: BUY rejected (bullish=%d/3)", bullish_score,
+                )
+                return TradeAction.HOLD
+        elif action == TradeAction.SELL:
+            # Need at least 2/3 bearish signals to sell
+            bearish_score = 3 - bullish_score
+            if bearish_score < 2:
+                self.logger.debug(
+                    "TREND FILTER: SELL rejected (bearish=%d/3)", bearish_score,
+                )
+                return TradeAction.HOLD
+
+        return action
+
+    @staticmethod
+    def _ema(data: np.ndarray, period: int) -> np.ndarray:
+        """Compute exponential moving average."""
+        alpha = 2.0 / (period + 1)
+        ema = np.zeros_like(data)
+        ema[0] = data[0]
+        for i in range(1, len(data)):
+            ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
+        return ema
 
     # ═══════════════════════════════════════════
     # HEARTBEAT & STATUS
