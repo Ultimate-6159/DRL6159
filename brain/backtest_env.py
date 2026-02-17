@@ -135,6 +135,8 @@ class BacktestEnv(gym.Env):
         self._recent_trades = 0
         self._consecutive_wins = 0
         self._consecutive_losses = 0
+        # Action diversity tracking
+        self._action_counts = {0: 0, 1: 0, 2: 0}  # BUY, SELL, HOLD
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -159,6 +161,18 @@ class BacktestEnv(gym.Env):
         close = bar[3]
         spread = self.spreads[self.current_step]
         atr = max(self.atrs[self.current_step], 0.01)
+
+        # ── Track action for diversity penalty ─────────
+        self._action_counts[action] = self._action_counts.get(action, 0) + 1
+        total_actions = sum(self._action_counts.values())
+
+        # Penalize repetitive actions (same action > 70% of time)
+        if total_actions > 100:
+            action_ratio = self._action_counts[action] / total_actions
+            if action_ratio > 0.70:
+                # Heavy penalty for always picking same action
+                diversity_penalty = -0.1 * (action_ratio - 0.70)
+                reward += diversity_penalty
 
         # ── Manage existing position ─────────
         if self.position is not None:
@@ -257,19 +271,25 @@ class BacktestEnv(gym.Env):
     def _open_position(self, action, close, spread, atr):
         direction = 1 if action == TradeAction.BUY.value else -1
 
-        # ── Trend confirmation during training ──
-        # Penalize counter-trend entries to teach selectivity
+        # ── STRICT Trend confirmation during training ──
+        # Heavy penalty for counter-trend entries
         trend_penalty = 0.0
         idx = self.current_step
-        if idx >= 30:
-            closes = self.bars[idx-30:idx+1, 3]  # Last 30 closes
-            ema_fast = self._simple_ema(closes, 10)
-            ema_slow = self._simple_ema(closes, 30)
+        if idx >= 50:
+            closes = self.bars[idx-50:idx+1, 3]  # Last 50 closes
+            ema_fast = self._simple_ema(closes, 20)
+            ema_slow = self._simple_ema(closes, 50)
             trend_up = ema_fast > ema_slow
-            if direction == 1 and not trend_up:
-                trend_penalty = -0.3  # Buying in downtrend
-            elif direction == -1 and trend_up:
-                trend_penalty = -0.3  # Selling in uptrend
+
+            # Also check price momentum
+            momentum = (closes[-1] - closes[-10]) / closes[-10] if len(closes) >= 10 else 0
+
+            if direction == 1:  # BUY
+                if not trend_up or momentum < -0.001:
+                    trend_penalty = -0.8  # Heavy penalty for buying in downtrend
+            else:  # SELL
+                if trend_up or momentum > 0.001:
+                    trend_penalty = -0.8  # Heavy penalty for selling in uptrend
 
         spread_cost = spread * self.point_value
         entry = close + (spread_cost / 2) * direction
