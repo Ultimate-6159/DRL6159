@@ -53,11 +53,15 @@ class RegimeClassifier:
         self._bar_counter += 1
 
         # Only re-evaluate every N bars for efficiency
+        # BUT always evaluate on first call or if UNCERTAIN
         if (self._bar_counter % self.config.update_frequency != 0
-                and self._current_regime != MarketRegime.UNCERTAIN):
+                and self._current_regime != MarketRegime.UNCERTAIN
+                and self._bar_counter > 1):
             return self._current_regime, self._confidence
 
         if len(df) < self.config.trend_window + 10:
+            logger.warning("Not enough data for regime classification: %d bars (need %d)",
+                          len(df), self.config.trend_window + 10)
             return MarketRegime.UNCERTAIN, 0.0
 
         close = df["close"].values
@@ -70,8 +74,15 @@ class RegimeClassifier:
         # ── Decision Logic ──────────────────────
         regime, confidence = self._decide_regime(vol_ratio, hurst, trend_strength)
 
+        # Log raw values for debugging
+        logger.debug(
+            "Regime indicators: vol_ratio=%.3f hurst=%.3f trend=%.3f -> %s (conf=%.2f)",
+            vol_ratio, hurst, trend_strength, regime.value, confidence
+        )
+
         # Only switch regime if confidence exceeds threshold
-        if confidence >= self.config.regime_change_threshold:
+        # OR if this is the first classification (escape from UNCERTAIN)
+        if confidence >= self.config.regime_change_threshold or self._bar_counter <= 2:
             if regime != self._current_regime:
                 logger.info(
                     "Regime changed: %s → %s (confidence=%.2f) | "

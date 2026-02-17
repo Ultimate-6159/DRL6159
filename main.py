@@ -317,14 +317,24 @@ class ApexPredator:
                 # ── Step 4: Regime Classification
                 regime, regime_conf = self.regime_classifier.classify(full_buffer)
 
-                # Skip trading in uncertain regime
-                if regime == MarketRegime.UNCERTAIN and regime_conf > 0.5:
-                    if self._loop_count % 10 == 0:
+                # Log regime info for debugging (first 100 loops or every 60 loops)
+                if self._loop_count <= 100 or self._loop_count % 60 == 0:
+                    self.logger.info(
+                        "REGIME | %s (conf=%.2f) | Loop: %d",
+                        regime.value, regime_conf, self._loop_count,
+                    )
+
+                # Skip trading ONLY in uncertain regime with VERY high confidence
+                # Relaxed: Allow trading even when uncertain if confidence is moderate
+                if regime == MarketRegime.UNCERTAIN and regime_conf > 0.7:
+                    if self._loop_count % 30 == 0:
                         self.logger.info(
                             "WAITING | Regime: UNCERTAIN (conf=%.2f) — holding cash | Loop: %d",
                             regime_conf, self._loop_count,
                         )
-                    time.sleep(5)
+                    # Don't skip entirely, just reduce decision frequency
+                    last_decision_time = current_time
+                    time.sleep(3)
                     continue
 
                 # ── Step 5: Build Raw-Feature Observation ─
