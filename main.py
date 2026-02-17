@@ -302,11 +302,19 @@ class ApexPredator:
 
                 # ── Step 8: Agent Decision ──────
                 action, confidence = self.drl_agent.predict(observation)
+                raw_action = action  # Save for diagnostics
 
                 # ── Step 8.5: Trend Confirmation Filter ──
                 # Prevent trading against the dominant trend
                 if action != TradeAction.HOLD:
                     action = self._apply_trend_filter(action, full_buffer)
+
+                # Diagnostic logging every 60 loops
+                if self._loop_count % 60 == 0:
+                    self.logger.info(
+                        "DIAG | Loop: %d | Model: %s (conf=%.2f) | After TrendFilter: %s | Spread: %.1f",
+                        self._loop_count, raw_action.name, confidence, action.name, spread,
+                    )
 
                 # ── Step 9: Risk Evaluation ─────
                 if action != TradeAction.HOLD:
@@ -328,7 +336,7 @@ class ApexPredator:
                     if proposal.approved:
                         self._execute_trade(action, proposal, observation, embedding, regime)
                     else:
-                        self.logger.debug(
+                        self.logger.info(
                             "Trade REJECTED: %s | Reason: %s",
                             action.name, proposal.reason,
                         )
