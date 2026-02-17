@@ -123,6 +123,8 @@ class MT5Connector:
         logger.info("MT5 connected — Account: %s | Symbol: %s",
                      mt5.account_info().login if mt5.account_info() else "N/A",
                      self.config.symbol)
+        logger.info("Symbol info — Point: %s | Digits: %d",
+                     self._symbol_info.point, self._symbol_info.digits)
         return True
 
     def disconnect(self):

@@ -143,10 +143,13 @@ class ApexPredator:
         self._initial_equity = account.get("equity", 10000.0)
         self.risk_manager.set_initial_balance(self._initial_equity)
 
-        # Use sensible default spread for XAUUSDm (Gold) if current spread is abnormal
+        # Use sensible default spread based on symbol
+        # XAUUSDm on Exness uses 3 decimal places (point=0.001), so spread ~200-300 points is normal
         current_spread = self.data_feed.get_spread()
-        default_spread = 25.0  # Normal spread for XAUUSDm is ~15-30 points
-        if current_spread > default_spread * 3:  # If spread > 75, probably market issue
+        default_spread = 250.0  # Normal spread for XAUUSDm is ~200-300 points ($0.20-$0.30)
+        max_normal_spread = 500.0  # Spread > 500 points ($0.50) is abnormal
+
+        if current_spread > max_normal_spread:
             self.logger.warning(
                 "Current spread %.1f is abnormally high, using default %.1f as baseline",
                 current_spread, default_spread
