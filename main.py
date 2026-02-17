@@ -331,6 +331,7 @@ class ApexPredator:
                         open_positions=len(positions),
                         point=symbol_info.get("point", 0.00001),
                         contract_size=symbol_info.get("trade_contract_size", 100000),
+                        spread=spread,
                     )
 
                     if proposal.approved:

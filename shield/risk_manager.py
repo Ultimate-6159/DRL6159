@@ -40,6 +40,7 @@ class RiskManager:
         self._daily_loss = 0.0
         self._trade_count_today = 0
         self._initial_balance = 0.0
+        self._last_trade_time: float = 0.0
 
     def set_initial_balance(self, balance: float):
         """Set the initial balance for drawdown calculations."""
@@ -56,6 +57,7 @@ class RiskManager:
         open_positions: int = 0,
         point: float = 0.00001,
         contract_size: float = 100000,
+        spread: float = 0.0,
     ) -> TradeProposal:
         """
         Evaluate whether a trade should be allowed and calculate sizing.
@@ -103,6 +105,20 @@ class RiskManager:
                     risk_amount=0.0, reward_ratio=0.0,
                 )
 
+        # ── Check trade cooldown ────────────────
+        import time as _time
+        cooldown = getattr(self.config, 'trade_cooldown_sec', 0)
+        if cooldown > 0 and self._last_trade_time > 0:
+            elapsed = _time.time() - self._last_trade_time
+            if elapsed < cooldown:
+                remaining = int(cooldown - elapsed)
+                return TradeProposal(
+                    approved=False, lot_size=0.0, stop_loss=0.0,
+                    take_profit=0.0,
+                    reason=f"COOLDOWN ({remaining}s remaining)",
+                    risk_amount=0.0, reward_ratio=0.0,
+                )
+
         # ── Check total drawdown ────────────────
         if self._initial_balance > 0:
             total_dd = (self._initial_balance - equity) / self._initial_balance
@@ -118,6 +134,15 @@ class RiskManager:
         sl_distance = atr * self.config.atr_multiplier
         if sl_distance < point * 10:
             sl_distance = point * 10  # Minimum 10 points SL
+
+        # Ensure SL is at least N times the spread
+        min_sl_mult = getattr(self.config, 'min_sl_spread_mult', 3.0)
+        spread_as_price = spread * point
+        min_sl_by_spread = spread_as_price * min_sl_mult
+        if sl_distance < min_sl_by_spread:
+            logger.info("SL widened: %.5f -> %.5f (spread=%.0f pts, mult=%.1fx)",
+                        sl_distance, min_sl_by_spread, spread, min_sl_mult)
+            sl_distance = min_sl_by_spread
 
         if action == TradeAction.BUY:
             stop_loss = current_price - sl_distance
@@ -150,6 +175,9 @@ class RiskManager:
             action.name, lot_size, stop_loss, take_profit,
             risk_amount, reward_ratio,
         )
+
+        import time as _time
+        self._last_trade_time = _time.time()
 
         return TradeProposal(
             approved=True,

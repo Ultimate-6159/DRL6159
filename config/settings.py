@@ -157,8 +157,10 @@ class RiskConfig:
     max_concurrent_trades: int = 1       # SINGLE position only ? avoid stacking losses
     max_lot_size: float = 0.5            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
-    atr_multiplier: float = 0.5          # Tighter SL = ATR * 0.5 (scalping)
-    tp_ratio: float = 2.5               # TP = SL * 2.5 ? asymmetric R:R favoring wins
+    atr_multiplier: float = 1.5          # SL = ATR * 1.5 (wider for live spread)
+    tp_ratio: float = 1.5               # TP = SL * 1.5 -- realistic for scalping
+    min_sl_spread_mult: float = 3.0      # SL must be >= 3x spread
+    trade_cooldown_sec: int = 300         # 5 min cooldown between trades
 
 
 # ??????????????????????????????????????????????
