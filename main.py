@@ -259,6 +259,9 @@ class ApexPredator:
                 # ── Step 1: Update Data ─────────
                 new_data = self.data_feed.update()
                 if not new_data and self._loop_count > 1:
+                    # Log heartbeat every 30 seconds while waiting
+                    if self._loop_count % 30 == 0:
+                        self.logger.info("HEARTBEAT | Loop: %d | Waiting for new M1 bar...", self._loop_count)
                     time.sleep(1)  # Wait for new bar
                     continue
 
