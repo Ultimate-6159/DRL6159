@@ -252,22 +252,40 @@ class ApexPredator:
         4. Agent decides → Risk evaluates → Execute
         5. Learn from result
         """
+        last_decision_time = 0.0  # Track when we last made a trading decision
+        decision_interval = 10.0  # Minimum seconds between trading decisions
+
         while self._running:
             try:
                 self._loop_count += 1
 
                 # ── Step 1: Update Data ─────────
                 new_data = self.data_feed.update()
-                if not new_data and self._loop_count > 1:
-                    # Log heartbeat every 30 seconds while waiting
-                    if self._loop_count % 30 == 0:
-                        self.logger.info("HEARTBEAT | Loop: %d | Waiting for new M1 bar...", self._loop_count)
-                    time.sleep(1)  # Wait for new bar
-                    continue
+
+                # Always try to update tick data for spread
+                self.data_feed.update_tick()
 
                 if not self.data_feed.is_ready():
+                    if self._loop_count % 30 == 0:
+                        self.logger.info("HEARTBEAT | Loop: %d | Waiting for data buffer to fill...", self._loop_count)
                     time.sleep(1)
                     continue
+
+                # Rate limit trading decisions when no new bar
+                current_time = time.time()
+                if not new_data and self._loop_count > 1:
+                    # Still manage positions even without new bars
+                    positions = self.connector.get_open_positions()
+                    if positions:
+                        observation = self._last_observation if self._last_observation is not None else np.zeros(1)
+                        self._manage_positions(observation)
+
+                    # Only make new trading decisions every decision_interval seconds
+                    if current_time - last_decision_time < decision_interval:
+                        if self._loop_count % 30 == 0:
+                            self.logger.info("HEARTBEAT | Loop: %d | Waiting for new M1 bar...", self._loop_count)
+                        time.sleep(1)
+                        continue
 
                 # ── Step 2: Circuit Breaker Check
                 account = self.connector.get_account_info()
@@ -371,6 +389,9 @@ class ApexPredator:
                     )
 
                 # ── Step 9: Risk Evaluation ─────
+                # Update decision time for rate limiting
+                last_decision_time = current_time
+
                 if action != TradeAction.HOLD:
                     atr_values = self.feature_engine._compute_atr(full_buffer)
                     current_atr = float(atr_values.iloc[-1]) if not atr_values.empty else 0.0005
@@ -401,6 +422,8 @@ class ApexPredator:
                             "Trade REJECTED: %s | Reason: %s | OpenPos: %d",
                             action.name, proposal.reason, len(positions),
                         )
+                else:
+                    self.logger.debug("Agent decided HOLD — no trade attempted")
 
                 # ── Step 10: Manage Open Positions
                 self._manage_positions(observation)
