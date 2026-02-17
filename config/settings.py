@@ -154,13 +154,13 @@ class RiskConfig:
     max_risk_per_trade: float = 0.005    # Max 0.5% risk per trade (conservative)
     max_daily_loss: float = 0.03         # Max 3% daily drawdown
     max_total_drawdown: float = 0.10     # Max 10% total drawdown -> halt
-    max_concurrent_trades: int = 1       # SINGLE position only ? avoid stacking losses
+    max_concurrent_trades: int = 1       # SINGLE position only → avoid stacking losses
     max_lot_size: float = 0.5            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
     atr_multiplier: float = 1.5          # SL = ATR * 1.5 (wider for live spread)
     tp_ratio: float = 1.5               # TP = SL * 1.5 -- realistic for scalping
     min_sl_spread_mult: float = 3.0      # SL must be >= 3x spread
-    trade_cooldown_sec: int = 300         # 5 min cooldown between trades
+    trade_cooldown_sec: int = 60          # 1 min cooldown between trades (scalping)
 
 
 # ??????????????????????????????????????????????
