@@ -565,55 +565,65 @@ class ApexPredator:
 
     def _apply_trend_filter(self, action: TradeAction, df) -> TradeAction:
         """
-        Multi-timeframe trend confirmation using EMA crossover and momentum.
-        Only allow trades in the direction of the dominant trend.
-        Converts counter-trend trades to HOLD.
-
-        Uses:
-        - EMA 10 vs EMA 30 for short-term trend
-        - EMA 30 vs EMA 60 for medium-term trend
-        - Price momentum (last 5 bars)
+        STRICT trend filter - MUST trade with the trend, not against it.
+        Uses multiple timeframe confirmation.
         """
-        if df is None or len(df) < 60:
+        if df is None or len(df) < 100:
             return action
 
         close = df["close"].values.astype(float)
 
-        # EMAs
-        ema_10 = self._ema(close, 10)
-        ema_30 = self._ema(close, 30)
-        ema_60 = self._ema(close, 60)
+        # EMAs for trend detection
+        ema_20 = self._ema(close, 20)
+        ema_50 = self._ema(close, 50)
+        ema_100 = self._ema(close, 100)
 
-        # Short-term trend: EMA10 vs EMA30
-        short_trend_up = ema_10[-1] > ema_30[-1]
-        # Medium-term trend: EMA30 vs EMA60
-        medium_trend_up = ema_30[-1] > ema_60[-1]
+        # Current price vs EMAs
+        price_above_ema20 = close[-1] > ema_20[-1]
+        price_above_ema50 = close[-1] > ema_50[-1]
+        price_above_ema100 = close[-1] > ema_100[-1]
 
-        # Price momentum: last 5 bars
-        if len(close) >= 5:
-            momentum_up = close[-1] > close[-5]
-        else:
-            momentum_up = close[-1] > close[0]
+        # EMA alignment (strong trend indicator)
+        ema_bullish_aligned = ema_20[-1] > ema_50[-1] > ema_100[-1]
+        ema_bearish_aligned = ema_20[-1] < ema_50[-1] < ema_100[-1]
 
-        # Count bullish signals (0-3)
-        bullish_score = int(short_trend_up) + int(medium_trend_up) + int(momentum_up)
+        # Recent momentum (last 10 bars)
+        recent_momentum = (close[-1] - close[-10]) / close[-10] if len(close) >= 10 else 0
+
+        # Count bullish signals
+        bullish_signals = sum([
+            price_above_ema20,
+            price_above_ema50,
+            price_above_ema100,
+            ema_bullish_aligned,
+            recent_momentum > 0.001,  # 0.1% up momentum
+        ])
+
+        bearish_signals = 5 - bullish_signals
+
+        # Log for debugging
+        self.logger.info(
+            "TREND CHECK | Price: %.2f | EMA20: %.2f | EMA50: %.2f | EMA100: %.2f | "
+            "Bullish: %d/5 | Bearish: %d/5 | Momentum: %.4f",
+            close[-1], ema_20[-1], ema_50[-1], ema_100[-1],
+            bullish_signals, bearish_signals, recent_momentum
+        )
+
+        # STRICT RULES:
+        # - Need 4/5 bullish signals to BUY
+        # - Need 4/5 bearish signals to SELL
+        # - Otherwise HOLD
 
         if action == TradeAction.BUY:
-            # Need at least 2/3 bullish signals to buy
-            if bullish_score < 2:
-                self.logger.debug(
-                    "TREND FILTER: BUY rejected (bullish=%d/3)", bullish_score,
-                )
+            if bullish_signals < 4:
+                self.logger.info("TREND FILTER: BUY blocked (bullish=%d/5, need 4)", bullish_signals)
                 return TradeAction.HOLD
         elif action == TradeAction.SELL:
-            # Need at least 2/3 bearish signals to sell
-            bearish_score = 3 - bullish_score
-            if bearish_score < 2:
-                self.logger.debug(
-                    "TREND FILTER: SELL rejected (bearish=%d/3)", bearish_score,
-                )
+            if bearish_signals < 4:
+                self.logger.info("TREND FILTER: SELL blocked (bearish=%d/5, need 4)", bearish_signals)
                 return TradeAction.HOLD
 
+        self.logger.info("TREND FILTER: %s approved", action.name)
         return action
 
     @staticmethod
