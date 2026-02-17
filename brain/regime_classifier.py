@@ -204,7 +204,7 @@ class RegimeClassifier:
             MarketRegime.HIGH_VOLATILITY: 0.0,
             MarketRegime.TRENDING: 0.0,
             MarketRegime.MEAN_REVERTING: 0.0,
-            MarketRegime.UNCERTAIN: 0.2,  # Base score for uncertain
+            MarketRegime.UNCERTAIN: 0.1,  # Lower base score for uncertain
         }
 
         # ── High Volatility Detection ───────────
@@ -214,27 +214,35 @@ class RegimeClassifier:
                 (vol_ratio - self.config.vol_ratio_threshold) * 0.3, 0.3
             )
 
-        # ── Trending Detection ──────────────────
-        if hurst > 0.55 and trend_strength > self.config.trend_strength_threshold:
-            scores[MarketRegime.TRENDING] += 0.4
-            scores[MarketRegime.TRENDING] += trend_strength * 0.3
-            scores[MarketRegime.TRENDING] += (hurst - 0.5) * 0.3
+        # ── Trending Detection (RELAXED thresholds) ──────────────────
+        # Original: hurst > 0.55 AND trend_strength > 0.6
+        # Now: hurst > 0.50 OR trend_strength > 0.4
+        if hurst > 0.50 or trend_strength > 0.4:
+            scores[MarketRegime.TRENDING] += 0.3
+            scores[MarketRegime.TRENDING] += trend_strength * 0.4
+            if hurst > 0.5:
+                scores[MarketRegime.TRENDING] += (hurst - 0.5) * 0.3
 
-        # ── Mean Reversion Detection ────────────
-        if hurst < 0.45:
-            scores[MarketRegime.MEAN_REVERTING] += 0.4
+        # ── Mean Reversion Detection (RELAXED) ────────────
+        if hurst < 0.50:
+            scores[MarketRegime.MEAN_REVERTING] += 0.3
             scores[MarketRegime.MEAN_REVERTING] += (0.5 - hurst) * 0.4
 
-        if vol_ratio < 0.8:
+        if vol_ratio < 0.9:  # Relaxed from 0.8
             scores[MarketRegime.MEAN_REVERTING] += 0.2
 
         # ── Select strongest regime ─────────────
         best_regime = max(scores, key=scores.get)
         best_score = scores[best_regime]
 
-        # Normalize confidence to [0, 1]
-        total = sum(scores.values())
-        confidence = best_score / total if total > 0 else 0.0
+        # Calculate confidence as ratio of best score to max possible (1.0)
+        # This prevents UNCERTAIN from getting 100% confidence when others have 0
+        max_possible = 1.0
+        confidence = best_score / max_possible
+
+        # If UNCERTAIN wins but with low absolute score, reduce confidence further
+        if best_regime == MarketRegime.UNCERTAIN:
+            confidence = min(confidence, 0.3)  # Cap UNCERTAIN confidence at 30%
 
         return best_regime, float(np.clip(confidence, 0.0, 1.0))
 
