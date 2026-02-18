@@ -308,22 +308,40 @@ class RegimeClassifier:
                 (vol_ratio - self.config.vol_ratio_threshold) * 0.3, 0.3
             )
 
-        # ── Trending Detection (RELAXED thresholds) ──────────────────
-        # Original: hurst > 0.55 AND trend_strength > 0.6
-        # Now: hurst > 0.50 OR trend_strength > 0.4
-        if hurst > 0.50 or trend_strength > 0.4:
-            scores[MarketRegime.TRENDING] += 0.3
-            scores[MarketRegime.TRENDING] += trend_strength * 0.4
-            if hurst > 0.5:
-                scores[MarketRegime.TRENDING] += (hurst - 0.5) * 0.3
+        # ── Trending Detection (STRICT thresholds) ──────────────────
+        # BOTH conditions must be met for strong trending
+        # Hurst > 0.55 = persistent (true trend)
+        # trend_strength > 0.5 = price follows regression line well
+        if hurst > 0.55 and trend_strength > 0.5:
+            # Strong trend: both indicators confirm
+            scores[MarketRegime.TRENDING] += 0.4
+            scores[MarketRegime.TRENDING] += trend_strength * 0.3
+            scores[MarketRegime.TRENDING] += (hurst - 0.55) * 0.3
+        elif hurst > 0.58 or trend_strength > 0.65:
+            # Moderate trend: one very strong indicator
+            scores[MarketRegime.TRENDING] += 0.25
+            if hurst > 0.55:
+                scores[MarketRegime.TRENDING] += (hurst - 0.55) * 0.2
+            if trend_strength > 0.5:
+                scores[MarketRegime.TRENDING] += (trend_strength - 0.5) * 0.2
 
-        # ── Mean Reversion Detection (RELAXED) ────────────
-        if hurst < 0.50:
-            scores[MarketRegime.MEAN_REVERTING] += 0.3
-            scores[MarketRegime.MEAN_REVERTING] += (0.5 - hurst) * 0.4
+        # ── Mean Reversion Detection (ENHANCED) ────────────
+        # Hurst < 0.48 = anti-persistent (mean reverting)
+        # Random walk zone: 0.48 - 0.52
+        if hurst < 0.48:
+            # Strong mean reversion signal
+            scores[MarketRegime.MEAN_REVERTING] += 0.4
+            scores[MarketRegime.MEAN_REVERTING] += (0.48 - hurst) * 0.5
+        elif hurst < 0.52 and trend_strength < 0.45:
+            # Random walk zone with weak trend = likely consolidation
+            scores[MarketRegime.MEAN_REVERTING] += 0.25
+            scores[MarketRegime.MEAN_REVERTING] += (0.52 - hurst) * 0.3
 
-        if vol_ratio < 0.9:  # Relaxed from 0.8
-            scores[MarketRegime.MEAN_REVERTING] += 0.2
+        # Low volatility favors mean reversion
+        if vol_ratio < 0.95:
+            scores[MarketRegime.MEAN_REVERTING] += 0.15
+        if vol_ratio < 0.8:
+            scores[MarketRegime.MEAN_REVERTING] += 0.1
 
         # ── Select strongest regime ─────────────
         best_regime = max(scores, key=scores.get)
