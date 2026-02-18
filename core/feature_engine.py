@@ -122,6 +122,18 @@ class FeatureEngine:
         vol_ma = df["volume"].rolling(window=20).mean()
         features["vol_spike"] = df["volume"].astype(float) / (vol_ma + 1e-10)
 
+        # ── MULTI-TIMEFRAME CONTEXT (ภาพใหญ่) ────
+        # ADX: วัดความแรงของเทรนด์ (0-100, >25 = trending)
+        features["adx"] = self._compute_adx(df, period=14) / 100.0  # Normalize to 0-1
+
+        # EMA 50 Distance: ราคาห่างจาก EMA 50 แค่ไหน (medium-term trend)
+        ema50 = df["close"].ewm(span=50, adjust=False).mean()
+        features["ema50_distance"] = (df["close"] - ema50) / (features["atr"] + 1e-10)
+
+        # EMA 200 Distance: ราคาห่างจาก EMA 200 แค่ไหน (long-term trend)
+        ema200 = df["close"].ewm(span=200, adjust=False).mean()
+        features["ema200_distance"] = (df["close"] - ema200) / (features["atr"] + 1e-10)
+
         # ── VWAP & Trapped Sentiment (Max Pain Theory) ────
         # VWAP = Volume Weighted Average Price = "ต้นทุนเฉลี่ยของตลาด"
         vwap = self._compute_vwap(df, window=20)
@@ -189,6 +201,43 @@ class FeatureEngine:
         rsi = 100 - (100 / (1 + rs))
         # Normalize RSI to [-1, 1] range
         return (rsi - 50) / 50
+
+    # ── ADX Calculation (Trend Strength) ───────
+
+    def _compute_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        Average Directional Index (ADX).
+        วัดความแรงของเทรนด์ (ไม่บอกทิศทาง):
+        - ADX > 25 = Strong trend
+        - ADX < 20 = Weak/No trend (ranging)
+        """
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
+
+        # True Range
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        # Directional Movement
+        up_move = high - high.shift(1)
+        down_move = low.shift(1) - low
+
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        # Smoothed averages (Wilder's smoothing)
+        atr = tr.ewm(alpha=1/period, adjust=False).mean()
+        plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / (atr + 1e-10))
+        minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / (atr + 1e-10))
+
+        # DX and ADX
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = dx.ewm(alpha=1/period, adjust=False).mean()
+
+        return adx
 
     # ── VWAP Calculation (Max Pain Theory) ───────
 

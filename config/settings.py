@@ -66,9 +66,11 @@ class FeatureConfig:
         "volatility", "momentum", "rsi_raw",
         "ema_cross", "macd_signal", "bb_position",
         "price_change_3", "high_low_ratio", "body_ratio",
-        # Momentum Sniper features (ตรวจจับจังหวะระเบิด)
+        # Momentum Sniper features
         "rsi_fast", "bb_width", "vol_spike",
-        # Max Pain Theory features (trapped sentiment detection)
+        # Multi-Timeframe Context (NEW!)
+        "adx", "ema50_distance", "ema200_distance",
+        # Max Pain Theory features
         "vwap_distance", "trapped_sentiment", "pain_intensity",
     ])
 
@@ -96,7 +98,7 @@ class RegimeConfig:
 @dataclass
 class PerceptionConfig:
     """LSTM / Transformer neural network settings."""
-    input_dim: int = 23                  # Number of input features (17 base + 3 Momentum + 3 Max Pain)
+    input_dim: int = 26                  # Number of features (17 base + 3 Momentum + 3 MTF + 3 MaxPain)
     hidden_dim: int = 128                # LSTM hidden state size
     num_layers: int = 2                  # Number of LSTM layers
     dropout: float = 0.2                 # Dropout rate
@@ -114,17 +116,17 @@ class PerceptionConfig:
 class DRLConfig:
     """PPO / SAC reinforcement learning settings."""
     algorithm: str = "PPO"               # "PPO" or "SAC"
-    learning_rate: float = 5e-5          # Fine-tuned: was 1e-4, reduced to prevent early stopping
+    learning_rate: float = 3e-4          # Higher start for LR Schedule (will decay)
     gamma: float = 0.99                  # Discount factor
     gae_lambda: float = 0.95            # GAE lambda
     clip_range: float = 0.2             # Standard clip
-    n_steps: int = 4096                  # More experience per update
-    batch_size: int = 1024               # Doubled for smoother gradients (was 512)
+    n_steps: int = 8192                  # DOUBLED: more experience per update (was 4096)
+    batch_size: int = 2048               # DOUBLED: smoother gradients (was 1024)
     n_epochs: int = 10                   # Standard epochs
-    ent_coef: float = 0.05              # Standard entropy
+    ent_coef: float = 0.02              # REDUCED: more decisive actions (was 0.05)
     vf_coef: float = 0.5                # Value function coefficient
     max_grad_norm: float = 0.5          # Standard clipping
-    target_kl: float = 0.05             # KL divergence limit
+    target_kl: float = 0.03             # Tighter KL limit for stability
     normalize_advantage: bool = True     # Normalize advantages for stability
     total_timesteps: int = 3_000_000     # Train longer for better convergence
     model_save_path: str = "models/"     # Model checkpoint directory
@@ -137,12 +139,12 @@ class DRLConfig:
 
 @dataclass
 class RewardConfig:
-    """Reward function parameters (Momentum Sniper style)."""
-    profit_reward: float = 1.5           # Moderate reward (focus on turnover, not big wins)
-    loss_penalty: float = -1.5           # Balanced penalty (fair game with profit)
-    hold_penalty: float = -0.05          # Penalize holding → force quick exits
-    max_hold_steps: int = 20             # Force close at 20 bars (tighter scalping)
-    drawdown_penalty: float = -5.0       # Restore to teach risk aversion
+    """Reward function parameters (Dynamic Profit Runner style)."""
+    profit_reward: float = 1.5           # Moderate reward
+    loss_penalty: float = -1.5           # Balanced penalty
+    hold_penalty: float = -0.01          # REDUCED: ให้ AI "ทนรวย" ได้
+    max_hold_steps: int = 60             # EXPANDED: 60 bars = 1 ชม. (was 20)
+    drawdown_penalty: float = -5.0       # Strong drawdown aversion
     sharpe_window: int = 50              # Rolling window for Sharpe calc
     risk_free_rate: float = 0.0          # Risk-free rate for Sharpe
     optimal_close_bonus: float = 1.0     # Bonus for closing at good R:R

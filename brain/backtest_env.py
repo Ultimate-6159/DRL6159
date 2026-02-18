@@ -467,66 +467,70 @@ class BacktestEnv(gym.Env):
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        Momentum Sniper reward function:
-        - Time decay penalty (ยิ่งถือนานยิ่งหักคะแนน)
-        - Balanced win/loss rewards
-        - Force quick exits for scalping
+        Dynamic Profit Runner Reward Function:
+        - Rewards "letting profits run" (unrealized PnL bonus)
+        - Soft time penalty (not harsh)
+        - Asymmetric: fear loss more than love gain
         """
         pnl_norm = pnl / self.initial_balance * 100
 
-        # ═══ TIME DECAY PENALTY (Momentum Sniper) ═══
-        # ยิ่งถือนาน คะแนนยิ่งลด → บีบให้รีบจบ
-        time_penalty = 0.0
-        if self.hold_bars > 0:
-            time_penalty = -0.05 * self.hold_bars  # -0.05 per bar held
-            # ถ้าถือเกิน 5 bars แล้วยังไม่กำไร → หักหนัก
-            if self.hold_bars > 5 and pnl <= 0:
-                time_penalty -= 0.5
+        # ═══ DYNAMIC TIME REWARD (not penalty!) ═══
+        # ถ้ากำลังกำไร → ให้ reward ที่ถือต่อ (let profit run)
+        # ถ้ากำลังขาดทุน → ให้ penalty เบาๆ (cut loss)
+        time_factor = 0.0
+        if self.hold_bars > 0 and self.position is not None:
+            # Get current unrealized PnL direction
+            idx = min(self.current_step, len(self.bars) - 1)
+            curr_close = self.bars[idx][3]
+            direction = self.position["direction"]
+            entry = self.position["entry"]
+            unrealized = (curr_close - entry) * direction
+
+            if unrealized > 0:
+                # กำลังกำไร → BONUS for holding! (Let profit run)
+                time_factor = 0.02 * min(self.hold_bars, 30)  # Max +0.6 bonus
+            else:
+                # กำลังขาดทุน → Soft penalty (should cut loss)
+                time_factor = -0.01 * self.hold_bars  # Gentle nudge to exit
 
         if pnl >= 0:
-            # Win: moderate base bonus + proportional reward
-            reward = 0.4 + pnl_norm * 1.2
+            # Win: base bonus + proportional + time factor
+            reward = 0.5 + pnl_norm * 1.0
 
             if event_type == "TP":
-                reward += 1.0  # TP bonus (reduced to balance)
+                reward += 1.2  # TP bonus
 
-            # Win streak escalation
-            reward += min(self._consecutive_wins, 5) * 0.1
-
-            # Speed bonus: ปิดเร็วได้ bonus
-            if self.hold_bars <= 3:
-                reward += 0.3  # Quick win bonus
-            elif self.hold_bars <= 10:
-                reward += 0.1
+            # Win streak bonus (capped)
+            reward += min(self._consecutive_wins, 5) * 0.08
 
             # Consistency bonus
             if self._recent_trades >= 5:
                 recent_wr = self._recent_wins / self._recent_trades
-                if recent_wr >= 0.6:
-                    reward += 0.3
+                if recent_wr >= 0.55:
+                    reward += 0.2
         else:
-            # Loss: balanced penalty
-            reward = -0.4 + pnl_norm * 1.0
+            # Loss: ASYMMETRIC - fear loss more!
+            reward = -0.8 + pnl_norm * 1.5  # Steeper loss penalty
 
             if event_type == "SL":
-                reward -= 0.2
+                reward -= 0.3  # SL hit = bad
             elif event_type == "FORCE":
-                reward -= 0.8  # Force close = bad but not catastrophic
+                reward -= 1.0  # Force close = very bad
 
-            # Consecutive loss penalty
+            # Consecutive loss penalty (stronger)
             if self._consecutive_losses >= 2:
-                reward -= 0.2 * (self._consecutive_losses - 1)
+                reward -= 0.3 * (self._consecutive_losses - 1)
 
-        # Add time penalty
-        reward += time_penalty
+        # Add time factor
+        reward += time_factor
 
-        # Drawdown penalty — starts at 3% DD
+        # Drawdown penalty — starts at 3% DD (asymmetric!)
         dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
         if dd > 0.03:
-            reward -= dd * 2.0
+            reward -= dd * 3.0  # Stronger drawdown aversion
 
         # ═══ REWARD CLIPPING ═══
-        reward = float(np.clip(reward, -2.5, 3.0))
+        reward = float(np.clip(reward, -3.0, 3.0))
 
         # ═══ REWARD SMOOTHING ═══
         self._reward_ema = (
@@ -536,7 +540,7 @@ class BacktestEnv(gym.Env):
 
         smoothed_reward = 0.7 * reward + 0.3 * self._reward_ema
 
-        return float(np.clip(smoothed_reward, -2.5, 3.0))
+        return float(np.clip(smoothed_reward, -3.0, 3.0))
 
     def _get_observation(self):
         """
