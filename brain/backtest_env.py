@@ -137,6 +137,9 @@ class BacktestEnv(gym.Env):
         self._consecutive_losses = 0
         # Action diversity tracking
         self._action_counts = {0: 0, 1: 0, 2: 0}  # BUY, SELL, HOLD
+        # ═══ REWARD SMOOTHING ═══
+        self._reward_ema = 0.0            # Smoothed reward for stable learning
+        self._reward_ema_alpha = 0.3      # EMA smoothing factor
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -384,9 +387,14 @@ class BacktestEnv(gym.Env):
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        High-winrate reward function for scalping.
+        High-winrate reward function for scalping with SMOOTHING.
         Heavily rewards TP hits and consistency.
         Harshly punishes losses to teach selectivity.
+
+        Fix for Critic Blindness:
+        - Clip rewards to bounded range
+        - Apply EMA smoothing to reduce variance
+        - Scale rewards to sensible range for value function
         """
         pnl_norm = pnl / self.initial_balance * 100
 
@@ -425,7 +433,21 @@ class BacktestEnv(gym.Env):
         if dd > 0.03:
             reward -= dd * 1.5
 
-        return float(np.clip(reward, -3.0, 5.0))
+        # ═══ REWARD CLIPPING (tighter range for stable Critic) ═══
+        reward = float(np.clip(reward, -2.0, 3.0))
+
+        # ═══ REWARD SMOOTHING (EMA to reduce variance) ═══
+        # This helps Value Function learn more stable targets
+        self._reward_ema = (
+            self._reward_ema_alpha * reward + 
+            (1 - self._reward_ema_alpha) * self._reward_ema
+        )
+
+        # Mix raw reward with smoothed: 70% raw + 30% smoothed
+        # This preserves signal while reducing noise
+        smoothed_reward = 0.7 * reward + 0.3 * self._reward_ema
+
+        return float(np.clip(smoothed_reward, -2.0, 3.0))
 
     def _get_observation(self):
         """

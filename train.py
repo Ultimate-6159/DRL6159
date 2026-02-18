@@ -415,15 +415,19 @@ def train_with_curriculum(
         for phase in schedule:
             logger.info("")
             logger.info("📚 %s — %s", phase["name"], phase["description"])
-            logger.info("   Timesteps: %s | Regimes: %s",
-                         f"{phase['timesteps']:,}", phase["regimes"])
+            logger.info("   Timesteps: %s | Regimes: %s | Vaccine: %s (%.0f%%)",
+                         f"{phase['timesteps']:,}", phase["regimes"],
+                         phase.get("vaccine_regimes", []),
+                         phase.get("vaccine_pct", 0) * 100)
             logger.info("=" * 60)
 
-            # Filter data for this phase
+            # Filter data for this phase (with vaccine for anti-forgetting)
             p_bars, p_feats, p_regimes, p_spreads, p_atrs = \
                 scheduler.filter_data_by_regimes(
                     bars, features, regimes, spreads, atrs,
                     allowed_regimes=phase["regimes"],
+                    vaccine_regimes=phase.get("vaccine_regimes", []),
+                    vaccine_pct=phase.get("vaccine_pct", 0.0),
                 )
 
             if len(p_bars) < 200:

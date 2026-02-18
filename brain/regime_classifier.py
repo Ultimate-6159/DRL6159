@@ -30,6 +30,11 @@ class RegimeClassifier:
     - ADX-like trend strength
 
     Outputs: (MarketRegime, confidence: float)
+
+    Features:
+    - Hysteresis: Prevents regime flicker by requiring buffer
+    - Smoothing: EMA on indicators to reduce noise
+    - Confirmation: Must hold new regime for N bars before switching
     """
 
     def __init__(self, config: RegimeConfig):
@@ -38,11 +43,24 @@ class RegimeClassifier:
         self._confidence = 0.0
         self._bar_counter = 0
 
+        # ═══ HYSTERESIS STATE ═══
+        self._pending_regime = None       # Regime waiting for confirmation
+        self._pending_confidence = 0.0
+        self._pending_bars = 0            # How many bars pending regime held
+        self._confirmation_bars = 3       # Must hold for N bars to confirm
+        self._hysteresis_buffer = 0.15    # Must exceed current regime by 15%
+
+        # ═══ SMOOTHING STATE (EMA) ═══
+        self._ema_alpha = 0.3             # EMA smoothing factor (0.3 = responsive but smooth)
+        self._smoothed_vol_ratio = None
+        self._smoothed_hurst = None
+        self._smoothed_trend = None
+
     # ── Main Interface ──────────────────────────
 
     def classify(self, df: pd.DataFrame) -> Tuple[MarketRegime, float]:
         """
-        Classify the current market regime.
+        Classify the current market regime with hysteresis and smoothing.
 
         Args:
             df: OHLC DataFrame with at least `close` column.
@@ -66,32 +84,108 @@ class RegimeClassifier:
 
         close = df["close"].values
 
-        # ── Compute indicators ──────────────────
-        vol_ratio = self._volatility_ratio(close)
-        hurst = self._hurst_exponent(close)
-        trend_strength = self._trend_strength(close)
+        # ── Compute raw indicators ──────────────────
+        raw_vol_ratio = self._volatility_ratio(close)
+        raw_hurst = self._hurst_exponent(close)
+        raw_trend = self._trend_strength(close)
 
-        # ── Decision Logic ──────────────────────
-        regime, confidence = self._decide_regime(vol_ratio, hurst, trend_strength)
+        # ── Apply EMA Smoothing ──────────────────
+        vol_ratio = self._apply_ema("vol_ratio", raw_vol_ratio)
+        hurst = self._apply_ema("hurst", raw_hurst)
+        trend_strength = self._apply_ema("trend", raw_trend)
+
+        # ── Decision Logic with Hysteresis ──────────────────────
+        candidate_regime, candidate_confidence = self._decide_regime(vol_ratio, hurst, trend_strength)
 
         # Log raw values for debugging
         logger.debug(
             "Regime indicators: vol_ratio=%.3f hurst=%.3f trend=%.3f -> %s (conf=%.2f)",
-            vol_ratio, hurst, trend_strength, regime.value, confidence
+            vol_ratio, hurst, trend_strength, candidate_regime.value, candidate_confidence
         )
 
-        # Only switch regime if confidence exceeds threshold
-        # OR if this is the first classification (escape from UNCERTAIN)
-        if confidence >= self.config.regime_change_threshold or self._bar_counter <= 2:
-            if regime != self._current_regime:
+        # ── Apply Hysteresis Logic ──────────────────
+        final_regime, final_confidence = self._apply_hysteresis(
+            candidate_regime, candidate_confidence
+        )
+
+        return final_regime, final_confidence
+
+    def _apply_ema(self, name: str, raw_value: float) -> float:
+        """Apply EMA smoothing to an indicator."""
+        attr_name = f"_smoothed_{name}"
+        current = getattr(self, attr_name, None)
+
+        if current is None:
+            # First value - initialize
+            setattr(self, attr_name, raw_value)
+            return raw_value
+
+        # EMA formula: new = alpha * raw + (1 - alpha) * old
+        smoothed = self._ema_alpha * raw_value + (1 - self._ema_alpha) * current
+        setattr(self, attr_name, smoothed)
+        return smoothed
+
+    def _apply_hysteresis(
+        self, candidate_regime: MarketRegime, candidate_confidence: float
+    ) -> Tuple[MarketRegime, float]:
+        """
+        Apply hysteresis to prevent regime flicker.
+
+        Rules:
+        1. If candidate == current: keep it, reset pending
+        2. If candidate != current: 
+           - Must exceed current confidence by buffer amount
+           - Must hold for confirmation_bars consecutive bars
+        """
+        # First call or escaping UNCERTAIN - no hysteresis needed
+        if self._bar_counter <= 2 or self._current_regime == MarketRegime.UNCERTAIN:
+            if candidate_regime != self._current_regime:
                 logger.info(
-                    "Regime changed: %s → %s (confidence=%.2f) | "
-                    "vol_ratio=%.2f hurst=%.3f trend=%.2f",
-                    self._current_regime.value, regime.value, confidence,
-                    vol_ratio, hurst, trend_strength,
+                    "Regime initialized: %s → %s (conf=%.2f)",
+                    self._current_regime.value, candidate_regime.value, candidate_confidence
                 )
-            self._current_regime = regime
-            self._confidence = confidence
+            self._current_regime = candidate_regime
+            self._confidence = candidate_confidence
+            self._pending_regime = None
+            self._pending_bars = 0
+            return self._current_regime, self._confidence
+
+        # Same regime as current - reinforce it
+        if candidate_regime == self._current_regime:
+            self._confidence = candidate_confidence
+            self._pending_regime = None
+            self._pending_bars = 0
+            return self._current_regime, self._confidence
+
+        # Different regime - apply hysteresis
+        # Check 1: Must exceed current confidence by buffer
+        if candidate_confidence < self._confidence + self._hysteresis_buffer:
+            # Not strong enough to challenge current regime
+            return self._current_regime, self._confidence
+
+        # Check 2: Is this the same pending regime?
+        if candidate_regime == self._pending_regime:
+            self._pending_bars += 1
+            self._pending_confidence = candidate_confidence
+        else:
+            # New pending regime - reset counter
+            self._pending_regime = candidate_regime
+            self._pending_confidence = candidate_confidence
+            self._pending_bars = 1
+
+        # Check 3: Has pending regime been confirmed for enough bars?
+        if self._pending_bars >= self._confirmation_bars:
+            logger.info(
+                "Regime changed (confirmed after %d bars): %s → %s (conf=%.2f) | "
+                "smoothed: vol=%.2f hurst=%.3f trend=%.2f",
+                self._pending_bars,
+                self._current_regime.value, self._pending_regime.value, self._pending_confidence,
+                self._smoothed_vol_ratio or 0, self._smoothed_hurst or 0, self._smoothed_trend or 0,
+            )
+            self._current_regime = self._pending_regime
+            self._confidence = self._pending_confidence
+            self._pending_regime = None
+            self._pending_bars = 0
 
         return self._current_regime, self._confidence
 
@@ -251,3 +345,11 @@ class RegimeClassifier:
         self._current_regime = MarketRegime.UNCERTAIN
         self._confidence = 0.0
         self._bar_counter = 0
+        # Reset hysteresis state
+        self._pending_regime = None
+        self._pending_confidence = 0.0
+        self._pending_bars = 0
+        # Reset smoothing state
+        self._smoothed_vol_ratio = None
+        self._smoothed_hurst = None
+        self._smoothed_trend = None

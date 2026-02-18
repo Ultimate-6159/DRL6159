@@ -28,6 +28,9 @@ class CurriculumScheduler:
     Each phase filters the full dataset to only include contiguous segments
     where the market regime matches the allowed set. The PPO model is
     continued (not reset) across phases, so knowledge transfers.
+
+    ANTI-FORGETTING: Each phase includes a small % of OTHER regimes
+    to prevent catastrophic forgetting and maintain generalization.
     """
 
     # Regime indices (matching MarketRegime enum order)
@@ -37,15 +40,22 @@ class CurriculumScheduler:
     UNCERTAIN = 3
 
     # Phase definitions: name → allowed regime indices
+    # vaccine_pct = percent of "other" regimes to mix in for anti-forgetting
     PHASES = [
         {"name": "Phase 1: Trending Only",
          "regimes": [0],           # TRENDING
-         "description": "Easy — clear directional moves"},
+         "vaccine_regimes": [1],   # Mix in some MEAN_REVERTING
+         "vaccine_pct": 0.15,      # 15% vaccine
+         "description": "Easy — clear directional moves + 15% vaccine"},
         {"name": "Phase 2: Trend + Range",
          "regimes": [0, 1],        # TRENDING + MEAN_REVERTING
-         "description": "Medium — add mean-reverting markets"},
+         "vaccine_regimes": [2, 3], # Mix in some HIGH_VOL/UNCERTAIN
+         "vaccine_pct": 0.10,      # 10% vaccine
+         "description": "Medium — add mean-reverting + 10% vaccine"},
         {"name": "Phase 3: All Regimes",
          "regimes": [0, 1, 2, 3],  # ALL
+         "vaccine_regimes": [],
+         "vaccine_pct": 0.0,
          "description": "Hard — full market complexity"},
     ]
 
@@ -72,6 +82,8 @@ class CurriculumScheduler:
                 "name": phase["name"],
                 "description": phase["description"],
                 "regimes": phase["regimes"],
+                "vaccine_regimes": phase.get("vaccine_regimes", []),
+                "vaccine_pct": phase.get("vaccine_pct", 0.0),
                 "timesteps": ts,
                 "phase_idx": i,
             })
@@ -87,13 +99,15 @@ class CurriculumScheduler:
         spreads: np.ndarray,
         atrs: np.ndarray,
         allowed_regimes: List[int],
+        vaccine_regimes: List[int] = None,
+        vaccine_pct: float = 0.0,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Filter training data to only include contiguous segments
         where the regime is in the allowed set.
 
-        Preserves time-series structure by keeping contiguous chunks
-        and padding boundaries with the last valid regime.
+        ANTI-FORGETTING: Mixes in a small percentage of "vaccine" regimes
+        to prevent catastrophic forgetting of how to handle them.
 
         Args:
             bars: (N, 4) OHLC array
@@ -102,11 +116,15 @@ class CurriculumScheduler:
             spreads: (N,) spread array
             atrs: (N,) ATR array
             allowed_regimes: List of regime indices to include
+            vaccine_regimes: List of regime indices to mix in as "vaccine"
+            vaccine_pct: Percentage of vaccine data to mix in (0.0-1.0)
 
         Returns:
             Filtered (bars, features, regimes, spreads, atrs)
         """
         N = len(bars)
+        vaccine_regimes = vaccine_regimes or []
+
         if N == 0:
             return bars, features, regimes, spreads, atrs
 
@@ -115,11 +133,9 @@ class CurriculumScheduler:
             logger.info("All regimes allowed — using full dataset (%d bars)", N)
             return bars, features, regimes, spreads, atrs
 
-        # Find contiguous segments of allowed regimes
+        # ═══ MAIN REGIME DATA ═══
         mask = np.isin(regimes, allowed_regimes)
         segments = self._find_contiguous_segments(mask)
-
-        # Filter to segments meeting minimum length
         valid_segments = [
             (start, end) for start, end in segments
             if (end - start) >= self.min_segment_length
@@ -133,32 +149,65 @@ class CurriculumScheduler:
             )
             return bars, features, regimes, spreads, atrs
 
-        # Concatenate valid segments
+        # Collect main data
         bar_chunks = []
         feat_chunks = []
         regime_chunks = []
         spread_chunks = []
         atr_chunks = []
+        main_bars = 0
 
-        total_bars = 0
         for start, end in valid_segments:
             bar_chunks.append(bars[start:end])
             feat_chunks.append(features[start:end])
             regime_chunks.append(regimes[start:end])
             spread_chunks.append(spreads[start:end])
             atr_chunks.append(atrs[start:end])
-            total_bars += end - start
+            main_bars += end - start
 
+        # ═══ VACCINE DATA (Anti-Forgetting) ═══
+        vaccine_bars = 0
+        if vaccine_regimes and vaccine_pct > 0:
+            vaccine_mask = np.isin(regimes, vaccine_regimes)
+            vaccine_segments = self._find_contiguous_segments(vaccine_mask)
+            valid_vaccine = [
+                (start, end) for start, end in vaccine_segments
+                if (end - start) >= self.min_segment_length // 2  # Shorter segments OK for vaccine
+            ]
+
+            if valid_vaccine:
+                # Calculate how many vaccine bars we need
+                target_vaccine_bars = int(main_bars * vaccine_pct / (1 - vaccine_pct))
+
+                # Sample vaccine segments
+                for start, end in valid_vaccine:
+                    if vaccine_bars >= target_vaccine_bars:
+                        break
+                    bar_chunks.append(bars[start:end])
+                    feat_chunks.append(features[start:end])
+                    regime_chunks.append(regimes[start:end])
+                    spread_chunks.append(spreads[start:end])
+                    atr_chunks.append(atrs[start:end])
+                    vaccine_bars += end - start
+
+                logger.info(
+                    "Vaccine data: added %d bars of regimes %s (%.1f%% of phase)",
+                    vaccine_bars, vaccine_regimes, 
+                    100 * vaccine_bars / (main_bars + vaccine_bars)
+                )
+
+        # Concatenate all chunks
         filtered_bars = np.concatenate(bar_chunks, axis=0)
         filtered_features = np.concatenate(feat_chunks, axis=0)
         filtered_regimes = np.concatenate(regime_chunks, axis=0)
         filtered_spreads = np.concatenate(spread_chunks, axis=0)
         filtered_atrs = np.concatenate(atr_chunks, axis=0)
 
+        total_bars = main_bars + vaccine_bars
         logger.info(
-            "Curriculum filter: regimes=%s → %d segments, %d/%d bars (%.1f%%)",
-            allowed_regimes, len(valid_segments),
-            total_bars, N, 100 * total_bars / N,
+            "Curriculum filter: regimes=%s + vaccine=%s → %d bars (%.1f%% of original)",
+            allowed_regimes, vaccine_regimes if vaccine_bars > 0 else "none",
+            total_bars, 100 * total_bars / N,
         )
 
         return (filtered_bars, filtered_features, filtered_regimes,
