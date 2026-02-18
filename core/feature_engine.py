@@ -110,6 +110,18 @@ class FeatureEngine:
         # ── Body Ratio (candle strength) ─────────
         features["body_ratio"] = (df["close"] - df["open"]) / (df["high"] - df["low"] + 1e-10)
 
+        # ── MOMENTUM SNIPER FEATURES (ตรวจจับจังหวะระเบิด) ────
+        # 1. RSI Fast (5-period) - แรงส่งระยะสั้น
+        features["rsi_fast"] = self._compute_rsi(df["close"], 5)
+
+        # 2. Bollinger Band Width - ดูกราฟบีบตัว (Squeeze) รอระเบิด
+        bb_width_raw = (bb_upper - bb_lower) / (bb_mid + 1e-10)
+        features["bb_width"] = bb_width_raw
+
+        # 3. Volume Spike - แรงกระชากของ Volume เทียบกับค่าเฉลี่ย
+        vol_ma = df["volume"].rolling(window=20).mean()
+        features["vol_spike"] = df["volume"].astype(float) / (vol_ma + 1e-10)
+
         # ── VWAP & Trapped Sentiment (Max Pain Theory) ────
         # VWAP = Volume Weighted Average Price = "ต้นทุนเฉลี่ยของตลาด"
         vwap = self._compute_vwap(df, window=20)

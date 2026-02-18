@@ -66,7 +66,9 @@ class FeatureConfig:
         "volatility", "momentum", "rsi_raw",
         "ema_cross", "macd_signal", "bb_position",
         "price_change_3", "high_low_ratio", "body_ratio",
-        # Max Pain Theory features (added for trapped sentiment detection)
+        # Momentum Sniper features (ตรวจจับจังหวะระเบิด)
+        "rsi_fast", "bb_width", "vol_spike",
+        # Max Pain Theory features (trapped sentiment detection)
         "vwap_distance", "trapped_sentiment", "pain_intensity",
     ])
 
@@ -94,7 +96,7 @@ class RegimeConfig:
 @dataclass
 class PerceptionConfig:
     """LSTM / Transformer neural network settings."""
-    input_dim: int = 20                  # Number of input features (17 base + 3 Max Pain)
+    input_dim: int = 23                  # Number of input features (17 base + 3 Momentum + 3 Max Pain)
     hidden_dim: int = 128                # LSTM hidden state size
     num_layers: int = 2                  # Number of LSTM layers
     dropout: float = 0.2                 # Dropout rate
@@ -135,12 +137,12 @@ class DRLConfig:
 
 @dataclass
 class RewardConfig:
-    """Reward function parameters (Sharpe-based)."""
-    profit_reward: float = 2.0           # Reward per pip profit
-    loss_penalty: float = -2.2           # Balanced penalty (was -4.0 = too harsh, AI too scared)
-    hold_penalty: float = -0.001         # Near-zero hold penalty → HOLD is OK
-    max_hold_steps: int = 30             # Force close faster (scalping)
-    drawdown_penalty: float = -3.0       # Reduced from -5.0 (less fear of drawdown)
+    """Reward function parameters (Momentum Sniper style)."""
+    profit_reward: float = 1.5           # Moderate reward (focus on turnover, not big wins)
+    loss_penalty: float = -1.5           # Balanced penalty (fair game with profit)
+    hold_penalty: float = -0.05          # Penalize holding → force quick exits
+    max_hold_steps: int = 20             # Force close at 20 bars (tighter scalping)
+    drawdown_penalty: float = -5.0       # Restore to teach risk aversion
     sharpe_window: int = 50              # Rolling window for Sharpe calc
     risk_free_rate: float = 0.0          # Risk-free rate for Sharpe
     optimal_close_bonus: float = 1.0     # Bonus for closing at good R:R
@@ -152,17 +154,17 @@ class RewardConfig:
 
 @dataclass
 class RiskConfig:
-    """Hard-coded risk management parameters (NO AI -- pure math)."""
-    max_risk_per_trade: float = 0.005    # Max 0.5% risk per trade (conservative)
+    """Hard-coded risk management parameters (Momentum Sniper style)."""
+    max_risk_per_trade: float = 0.01     # 1% risk per trade (aggressive scalping)
     max_daily_loss: float = 0.03         # Max 3% daily drawdown
     max_total_drawdown: float = 0.10     # Max 10% total drawdown -> halt
     max_concurrent_trades: int = 1       # SINGLE position only → avoid stacking losses
     max_lot_size: float = 0.5            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
-    atr_multiplier: float = 1.5          # SL = ATR * 1.5 (wider for live spread)
-    tp_ratio: float = 1.5               # TP = SL * 1.5 -- realistic for scalping
+    atr_multiplier: float = 1.0          # SL = ATR * 1.0 (tighter SL for scalping)
+    tp_ratio: float = 1.2                # TP = SL * 1.2 (50% win rate = profit)
     min_sl_spread_mult: float = 3.0      # SL must be >= 3x spread
-    trade_cooldown_sec: int = 60          # 1 min cooldown between trades (scalping)
+    trade_cooldown_sec: int = 30         # 30 sec cooldown (faster re-entry)
 
 
 # ??????????????????????????????????????????????

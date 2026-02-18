@@ -464,67 +464,76 @@ class BacktestEnv(gym.Env):
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        High-winrate reward function for scalping with SMOOTHING.
-        Heavily rewards TP hits and consistency.
-        Harshly punishes losses to teach selectivity.
-
-        Fix for Critic Blindness:
-        - Clip rewards to bounded range
-        - Apply EMA smoothing to reduce variance
-        - Scale rewards to sensible range for value function
+        Momentum Sniper reward function:
+        - Time decay penalty (ยิ่งถือนานยิ่งหักคะแนน)
+        - Balanced win/loss rewards
+        - Force quick exits for scalping
         """
         pnl_norm = pnl / self.initial_balance * 100
 
+        # ═══ TIME DECAY PENALTY (Momentum Sniper) ═══
+        # ยิ่งถือนาน คะแนนยิ่งลด → บีบให้รีบจบ
+        time_penalty = 0.0
+        if self.hold_bars > 0:
+            time_penalty = -0.05 * self.hold_bars  # -0.05 per bar held
+            # ถ้าถือเกิน 5 bars แล้วยังไม่กำไร → หักหนัก
+            if self.hold_bars > 5 and pnl <= 0:
+                time_penalty -= 0.5
+
         if pnl >= 0:
-            # Win: strong base bonus + proportional reward
-            reward = 0.5 + pnl_norm * 1.5
+            # Win: moderate base bonus + proportional reward
+            reward = 0.4 + pnl_norm * 1.2
 
             if event_type == "TP":
-                reward += 1.5  # Big TP bonus → learn to let winners run
+                reward += 1.0  # TP bonus (reduced to balance)
 
-            # Win streak escalation (stronger)
-            reward += min(self._consecutive_wins, 7) * 0.15
+            # Win streak escalation
+            reward += min(self._consecutive_wins, 5) * 0.1
 
-            # Consistency bonus: reward maintaining >70% WR
+            # Speed bonus: ปิดเร็วได้ bonus
+            if self.hold_bars <= 3:
+                reward += 0.3  # Quick win bonus
+            elif self.hold_bars <= 10:
+                reward += 0.1
+
+            # Consistency bonus
             if self._recent_trades >= 5:
                 recent_wr = self._recent_wins / self._recent_trades
-                if recent_wr >= 0.7:
-                    reward += 0.5  # Strong bonus for >70% win rate
-                elif recent_wr >= 0.5:
-                    reward += 0.1
+                if recent_wr >= 0.6:
+                    reward += 0.3
         else:
-            # Loss: harsh penalty to teach selectivity
-            reward = -0.5 + pnl_norm * 1.0
+            # Loss: balanced penalty
+            reward = -0.4 + pnl_norm * 1.0
 
             if event_type == "SL":
-                reward -= 0.3  # SL hit is still bad
+                reward -= 0.2
             elif event_type == "FORCE":
-                reward -= 1.0  # Force close = very bad
+                reward -= 0.8  # Force close = bad but not catastrophic
 
-            # Consecutive loss penalty (stronger)
+            # Consecutive loss penalty
             if self._consecutive_losses >= 2:
-                reward -= 0.3 * (self._consecutive_losses - 1)
+                reward -= 0.2 * (self._consecutive_losses - 1)
+
+        # Add time penalty
+        reward += time_penalty
 
         # Drawdown penalty — starts at 3% DD
         dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
         if dd > 0.03:
-            reward -= dd * 1.5
+            reward -= dd * 2.0
 
-        # ═══ REWARD CLIPPING (tighter range for stable Critic) ═══
-        reward = float(np.clip(reward, -2.0, 3.0))
+        # ═══ REWARD CLIPPING ═══
+        reward = float(np.clip(reward, -2.5, 3.0))
 
-        # ═══ REWARD SMOOTHING (EMA to reduce variance) ═══
-        # This helps Value Function learn more stable targets
+        # ═══ REWARD SMOOTHING ═══
         self._reward_ema = (
             self._reward_ema_alpha * reward + 
             (1 - self._reward_ema_alpha) * self._reward_ema
         )
 
-        # Mix raw reward with smoothed: 70% raw + 30% smoothed
-        # This preserves signal while reducing noise
         smoothed_reward = 0.7 * reward + 0.3 * self._reward_ema
 
-        return float(np.clip(smoothed_reward, -2.0, 3.0))
+        return float(np.clip(smoothed_reward, -2.5, 3.0))
 
     def _get_observation(self):
         """
