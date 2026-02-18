@@ -36,6 +36,37 @@ from brain.imitation import ExpertGenerator, ImitationPreTrainer
 logger = logging.getLogger("apex_predator.train")
 
 
+# ═══════════════════════════════════════════════════════════════
+# Custom Callback to Log PPO Metrics
+# ═══════════════════════════════════════════════════════════════
+
+from stable_baselines3.common.callbacks import BaseCallback
+
+
+class PPOMetricsCallback(BaseCallback):
+    """Callback to capture PPO training metrics for the report."""
+
+    def __init__(self, report: TrainingReport = None, log_freq: int = 10000, verbose: int = 0):
+        super().__init__(verbose)
+        self.report = report
+        self.log_freq = log_freq
+        self.last_log_timestep = 0
+
+    def _on_step(self) -> bool:
+        """Called after each step (env.step)."""
+        # Log every log_freq timesteps
+        if self.num_timesteps - self.last_log_timestep >= self.log_freq:
+            self.last_log_timestep = self.num_timesteps
+
+            # Get logged values from model's logger
+            if hasattr(self.model, "logger") and self.model.logger is not None:
+                name_to_value = getattr(self.model.logger, "name_to_value", {})
+                if name_to_value and self.report:
+                    self.report.log_ppo_metrics(self.num_timesteps, name_to_value)
+
+        return True  # Continue training
+
+
 def download_data(config: ApexConfig, bar_count: int, use_mt5: bool = True) -> pd.DataFrame:
     """
     Download historical OHLC data from MT5.
@@ -439,17 +470,21 @@ def train_with_curriculum(
                 verbose=1,
             )
 
-            # Train this phase
+            # Train this phase with callbacks
             checkpoint_cb = CheckpointCallback(
                 save_freq=max(phase["timesteps"] // 5, 1000),
                 save_path=config.drl.model_save_path,
                 name_prefix=f"ppo_phase{phase['phase_idx']}",
             )
 
+            # PPO metrics callback
+            metrics_cb = PPOMetricsCallback(report=report, log_freq=50000)
+            callbacks = [checkpoint_cb, metrics_cb]
+
             t0 = time.time()
             model.learn(
                 total_timesteps=phase["timesteps"],
-                callback=checkpoint_cb,
+                callback=callbacks,
                 progress_bar=False,
                 reset_num_timesteps=True,  # Fresh count per phase
             )

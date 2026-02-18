@@ -222,6 +222,32 @@ class TrainingReport:
                     phase_name, timesteps, bars, elapsed_sec)
 
     # ═══════════════════════════════════════════
+    # PPO TRAINING METRICS LOGGING
+    # ═══════════════════════════════════════════
+
+    def log_ppo_metrics(
+        self,
+        timestep: int,
+        metrics: Dict[str, float],
+    ) -> None:
+        """บันทึก PPO metrics (loss, kl, entropy, etc.)"""
+        if "ppo_metrics" not in self.report:
+            self.report["ppo_metrics"] = []
+
+        entry = {
+            "timestep": timestep,
+            "loss": metrics.get("train/loss", 0),
+            "policy_gradient_loss": metrics.get("train/policy_gradient_loss", 0),
+            "value_loss": metrics.get("train/value_loss", 0),
+            "entropy_loss": metrics.get("train/entropy_loss", 0),
+            "approx_kl": metrics.get("train/approx_kl", 0),
+            "clip_fraction": metrics.get("train/clip_fraction", 0),
+            "explained_variance": metrics.get("train/explained_variance", 0),
+            "learning_rate": metrics.get("train/learning_rate", 0),
+        }
+        self.report["ppo_metrics"].append(entry)
+
+    # ═══════════════════════════════════════════
     # TRAINING PROGRESS LOGGING
     # ═══════════════════════════════════════════
 
@@ -421,6 +447,25 @@ class TrainingReport:
         if ad.get("bias_warning"):
             lines.append(f"⚠️  {ad['bias_warning']}")
         lines.append("")
+
+        # PPO Metrics Summary
+        ppo_metrics = self.report.get("ppo_metrics", [])
+        if ppo_metrics:
+            lines.append("─" * 70)
+            lines.append("PPO TRAINING METRICS (last recorded)")
+            lines.append("─" * 70)
+            last = ppo_metrics[-1]
+            lines.append(f"  Timestep:          {last.get('timestep', 0):,}")
+            lines.append(f"  Loss:              {last.get('loss', 0):.4f}")
+            lines.append(f"  Policy Loss:       {last.get('policy_gradient_loss', 0):.4f}")
+            lines.append(f"  Value Loss:        {last.get('value_loss', 0):.4f}")
+            lines.append(f"  Entropy Loss:      {last.get('entropy_loss', 0):.4f}")
+            lines.append(f"  Approx KL:         {last.get('approx_kl', 0):.6f}")
+            lines.append(f"  Clip Fraction:     {last.get('clip_fraction', 0):.4f}")
+            lines.append(f"  Explained Var:     {last.get('explained_variance', 0):.4f}")
+            lines.append(f"  Learning Rate:     {last.get('learning_rate', 0):.2e}")
+            lines.append(f"  Total Snapshots:   {len(ppo_metrics)}")
+            lines.append("")
 
         # Evaluation Results
         lines.append("─" * 70)
