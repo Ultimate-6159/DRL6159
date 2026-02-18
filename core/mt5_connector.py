@@ -176,14 +176,60 @@ class MT5Connector:
             logger.error("Invalid timeframe: %s", self.config.timeframe)
             return None
 
-        rates = mt5.copy_rates_from_pos(self.config.symbol, tf, 0, count)
-        if rates is None or len(rates) == 0:
-            logger.warning("No OHLC data returned for %s", self.config.symbol)
-            return None
+        # Ensure symbol is selected and visible for data access
+        if not mt5.symbol_select(self.config.symbol, True):
+            logger.warning("Failed to select symbol %s: %s", 
+                          self.config.symbol, mt5.last_error())
+
+        # Request data in chunks if count is large (MT5 limitation)
+        MAX_CHUNK = 50000
+        if count > MAX_CHUNK:
+            logger.info("Requesting %d bars in chunks of %d...", count, MAX_CHUNK)
+            all_rates = []
+            remaining = count
+            offset = 0
+
+            while remaining > 0:
+                chunk_size = min(remaining, MAX_CHUNK)
+                rates = mt5.copy_rates_from_pos(self.config.symbol, tf, offset, chunk_size)
+
+                if rates is None or len(rates) == 0:
+                    if offset == 0:
+                        # First chunk failed - no data at all
+                        error = mt5.last_error()
+                        logger.warning("No OHLC data returned for %s (error: %s)", 
+                                      self.config.symbol, error)
+                        return None
+                    else:
+                        # Some data retrieved, stop here
+                        logger.info("Retrieved %d bars total (reached data limit)", 
+                                   len(all_rates))
+                        break
+
+                all_rates.extend(rates)
+                offset += chunk_size
+                remaining -= chunk_size
+                logger.debug("Chunk loaded: %d bars (total: %d)", len(rates), len(all_rates))
+
+            if len(all_rates) == 0:
+                return None
+            rates = np.array(all_rates)
+        else:
+            rates = mt5.copy_rates_from_pos(self.config.symbol, tf, 0, count)
+
+            if rates is None or len(rates) == 0:
+                error = mt5.last_error()
+                logger.warning("No OHLC data returned for %s (error: %s)", 
+                              self.config.symbol, error)
+                return None
 
         df = pd.DataFrame(rates)
         df["time"] = pd.to_datetime(df["time"], unit="s")
         df.rename(columns={"tick_volume": "volume"}, inplace=True)
+
+        logger.info("OHLC data loaded: %d bars from %s to %s",
+                   len(df), df["time"].iloc[0], df["time"].iloc[-1])
+
         return df[["time", "open", "high", "low", "close", "volume", "spread"]]
 
     def get_ticks(self, count: int = 1000) -> Optional[pd.DataFrame]:
