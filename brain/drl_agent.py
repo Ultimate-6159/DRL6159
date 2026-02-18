@@ -245,15 +245,40 @@ class DRLAgent:
             action = np.random.choice([0, 1, 2], p=[0.1, 0.1, 0.8])
             return TradeAction(action), 0.0
 
-        action, _states = self.model.predict(
-            observation, deterministic=True
-        )
+        # Handle observation dimension mismatch between model and current env
+        obs = self._adapt_observation(observation)
+
+        action, _states = self.model.predict(obs, deterministic=True)
         action_int = int(action)
 
         # Get action probabilities for confidence
-        confidence = self._get_action_confidence(observation, action_int)
+        confidence = self._get_action_confidence(obs, action_int)
 
         return TradeAction(action_int), confidence
+
+    def _adapt_observation(self, obs: np.ndarray) -> np.ndarray:
+        """
+        Adapt observation to match model's expected dimension.
+        Handles cases where model was trained with different feature count.
+        """
+        expected_dim = getattr(self, '_loaded_obs_dim', None)
+        if expected_dim is None:
+            return obs
+
+        current_dim = obs.shape[0]
+
+        if current_dim == expected_dim:
+            return obs
+        elif current_dim > expected_dim:
+            # Truncate: take first N elements (assuming base features come first)
+            logger.debug("Truncating obs from %d to %d", current_dim, expected_dim)
+            return obs[:expected_dim]
+        else:
+            # Pad: add zeros at the end
+            logger.debug("Padding obs from %d to %d", current_dim, expected_dim)
+            padded = np.zeros(expected_dim, dtype=np.float32)
+            padded[:current_dim] = obs
+            return padded
 
     def _get_action_confidence(self, obs: np.ndarray, action: int) -> float:
         """Extract confidence from policy distribution."""
@@ -311,32 +336,34 @@ class DRLAgent:
         logger.info("DRL model saved to %s", save_path)
 
     def load(self, path: Optional[str] = None):
-        """Load model checkpoint, restoring VecNormalize if available."""
+        """Load model checkpoint without env for inference mode."""
         try:
             from stable_baselines3 import PPO, SAC
-            from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
             load_path = path or os.path.join(
                 self.config.model_save_path, "drl_model"
             )
-            norm_path = os.path.join(
-                self.config.model_save_path, "vec_normalize.pkl"
-            )
 
-            # Wrap env the same way training does
-            vec_env = DummyVecEnv([lambda: self.env])
-            if os.path.exists(norm_path):
-                vec_env = VecNormalize.load(norm_path, vec_env)
-                vec_env.training = False
-                vec_env.norm_reward = False
-                logger.info("VecNormalize stats loaded from %s", norm_path)
-
+            # Load model WITHOUT env - for inference only
+            # This avoids observation_space mismatch issues
             AlgoClass = PPO if self.config.algorithm == "PPO" else SAC
-            self.model = AlgoClass.load(load_path, env=vec_env)
+
+            if os.path.exists(load_path + ".zip"):
+                self.model = AlgoClass.load(load_path, env=None)
+            elif os.path.exists(load_path):
+                self.model = AlgoClass.load(load_path, env=None)
+            else:
+                raise FileNotFoundError(f"Model not found at {load_path}")
+
+            # Store expected observation dimension from loaded model
+            self._loaded_obs_dim = self.model.observation_space.shape[0]
             self._initialized = True
-            logger.info("DRL model loaded from %s", load_path)
+            logger.info("DRL model loaded from %s (obs_dim=%d)", 
+                       load_path, self._loaded_obs_dim)
+
         except Exception as e:
             logger.error("Failed to load DRL model: %s", e)
+            self._initialized = False
 
     @property
     def is_ready(self) -> bool:

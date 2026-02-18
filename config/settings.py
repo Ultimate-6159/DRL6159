@@ -66,6 +66,8 @@ class FeatureConfig:
         "volatility", "momentum", "rsi_raw",
         "ema_cross", "macd_signal", "bb_position",
         "price_change_3", "high_low_ratio", "body_ratio",
+        # Max Pain Theory features (added for trapped sentiment detection)
+        "vwap_distance", "trapped_sentiment", "pain_intensity",
     ])
 
 
@@ -92,7 +94,7 @@ class RegimeConfig:
 @dataclass
 class PerceptionConfig:
     """LSTM / Transformer neural network settings."""
-    input_dim: int = 17                  # Number of input features (11 base + 6 scalping)
+    input_dim: int = 20                  # Number of input features (17 base + 3 Max Pain)
     hidden_dim: int = 128                # LSTM hidden state size
     num_layers: int = 2                  # Number of LSTM layers
     dropout: float = 0.2                 # Dropout rate
