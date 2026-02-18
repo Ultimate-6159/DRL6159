@@ -294,6 +294,10 @@ class BacktestEnv(gym.Env):
                 if trend_up or momentum > 0.001:
                     trend_penalty = -0.8  # Heavy penalty for selling in uptrend
 
+        # ── MAX PAIN BONUS (Trade with trapped sentiment) ──
+        # ให้ Bonus เมื่อเทรดตามทิศทางที่จะทำให้คนส่วนใหญ่เจ็บ
+        max_pain_bonus = self._compute_max_pain_bonus(direction)
+
         spread_cost = spread * self.point_value
         entry = close + (spread_cost / 2) * direction
 
@@ -315,7 +319,7 @@ class BacktestEnv(gym.Env):
             "trailing_active": False,     # Trailing activated flag
         }
         self.hold_bars = 0
-        return -0.005 + trend_penalty  # Friction + trend penalty
+        return -0.005 + trend_penalty + max_pain_bonus  # Friction + trend penalty + max pain bonus
 
     @staticmethod
     def _simple_ema(data, period):
@@ -325,6 +329,78 @@ class BacktestEnv(gym.Env):
         for i in range(1, len(data)):
             ema = alpha * data[i] + (1 - alpha) * ema
         return ema
+
+    def _compute_max_pain_bonus(self, direction: int) -> float:
+        """
+        Max Pain Theory Bonus.
+
+        ให้ reward เมื่อ AI เทรดตามทิศทางที่ "คนส่วนใหญ่จะเจ็บ":
+        - BUY เมื่อ Shorts กำลัง trapped (price > VWAP) → คาด squeeze UP
+        - SELL เมื่อ Longs กำลัง trapped (price < VWAP) → คาด dump DOWN
+
+        Features ที่ใช้ (จาก feature_engine):
+        - trapped_sentiment: ค่า > 0 = shorts trapped, < 0 = longs trapped
+        - pain_intensity: ความรุนแรงของ pain (ยิ่งสูง = โอกาสดี)
+
+        Args:
+            direction: 1 = BUY, -1 = SELL
+
+        Returns:
+            Bonus reward [-0.3, +0.5] based on alignment with max pain direction
+        """
+        idx = self.current_step
+        if idx >= len(self.features):
+            return 0.0
+
+        # Features array structure (from feature_engine):
+        # trapped_sentiment is near the end of features
+        # We'll use the last few features which include VWAP-related
+        feat = self.features[idx]
+
+        # ดึง trapped_sentiment จาก features
+        # ใน feature_engine เราใส่ไว้ท้ายๆ (index -3, -2, -1 สำหรับ vwap_distance, trapped_sentiment, pain_intensity)
+        # แต่เราต้อง normalize แล้ว ดังนั้นค่าจะอยู่ราวๆ [-2, 2] หลัง z-score
+
+        # สมมติ feature structure: [..., vwap_distance, trapped_sentiment, pain_intensity]
+        if len(feat) < 3:
+            return 0.0
+
+        # ใช้ feature ท้ายสุด 3 ตัวที่เราเพิ่มมา
+        try:
+            vwap_distance = feat[-3]      # ราคาห่างจาก VWAP แค่ไหน
+            trapped_sentiment = feat[-2]   # ใครกำลังเจ็บ (+shorts, -longs)
+            pain_intensity = feat[-1]      # ความรุนแรง
+        except (IndexError, TypeError):
+            return 0.0
+
+        # ── Logic: เทรดตามทิศทางที่คนเจ็บ ──
+        # ถ้า trapped_sentiment > 0 → Shorts เจ็บ → ควร BUY (squeeze up)
+        # ถ้า trapped_sentiment < 0 → Longs เจ็บ → ควร SELL (dump down)
+
+        bonus = 0.0
+
+        # Threshold สำหรับการตัดสินใจ (หลัง normalize, ค่าที่มีนัยสำคัญประมาณ |0.5|+)
+        SENTIMENT_THRESHOLD = 0.5
+
+        if trapped_sentiment > SENTIMENT_THRESHOLD:
+            # Shorts กำลังเจ็บ → ควร BUY
+            if direction == 1:  # BUY ถูกทาง
+                bonus = min(0.5, 0.2 * trapped_sentiment)  # Bonus สูงสุด +0.5
+            else:  # SELL ผิดทาง
+                bonus = max(-0.3, -0.15 * trapped_sentiment)  # Penalty สูงสุด -0.3
+
+        elif trapped_sentiment < -SENTIMENT_THRESHOLD:
+            # Longs กำลังเจ็บ → ควร SELL
+            if direction == -1:  # SELL ถูกทาง
+                bonus = min(0.5, 0.2 * abs(trapped_sentiment))  # Bonus สูงสุด +0.5
+            else:  # BUY ผิดทาง
+                bonus = max(-0.3, -0.15 * abs(trapped_sentiment))  # Penalty สูงสุด -0.3
+
+        # เพิ่ม bonus ถ้า pain_intensity สูง (โอกาสดีที่จะ squeeze/dump)
+        if abs(bonus) > 0 and pain_intensity > 0.3:
+            bonus *= (1 + min(pain_intensity, 1.0) * 0.3)  # เพิ่มได้สูงสุด 30%
+
+        return float(np.clip(bonus, -0.3, 0.5))
 
     def _update_trailing_stop(self, close, atr):
         """

@@ -110,6 +110,19 @@ class FeatureEngine:
         # ── Body Ratio (candle strength) ─────────
         features["body_ratio"] = (df["close"] - df["open"]) / (df["high"] - df["low"] + 1e-10)
 
+        # ── VWAP & Trapped Sentiment (Max Pain Theory) ────
+        # VWAP = Volume Weighted Average Price = "ต้นทุนเฉลี่ยของตลาด"
+        vwap = self._compute_vwap(df, window=20)
+        features["vwap_distance"] = (df["close"] - vwap) / (features["atr"] + 1e-10)
+
+        # Trapped Sentiment: วัดว่า "ฝ่ายไหนกำลังเจ็บปวด"
+        # > 0 = Shorts กำลังขาดทุน (ราคาสูงกว่าต้นทุนเฉลี่ย) → พร้อม squeeze ขึ้น
+        # < 0 = Longs กำลังติดดอย (ราคาต่ำกว่าต้นทุนเฉลี่ย) → พร้อม dump ลง
+        features["trapped_sentiment"] = self._compute_trapped_sentiment(df, vwap)
+
+        # Pain Intensity: ความรุนแรงของความเจ็บปวด (ยิ่งห่างยิ่งเจ็บ)
+        features["pain_intensity"] = abs(features["vwap_distance"]) * features["volatility"]
+
         # ── Drop NaN rows (from rolling calculations)
         features = features.dropna().reset_index(drop=True)
 
@@ -164,6 +177,52 @@ class FeatureEngine:
         rsi = 100 - (100 / (1 + rs))
         # Normalize RSI to [-1, 1] range
         return (rsi - 50) / 50
+
+    # ── VWAP Calculation (Max Pain Theory) ───────
+
+    def _compute_vwap(self, df: pd.DataFrame, window: int = 20) -> pd.Series:
+        """
+        Volume Weighted Average Price (Rolling).
+        ตัวแทนของ "ต้นทุนเฉลี่ยของคนทั้งตลาด"
+        """
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3
+        volume = df["volume"].astype(float).replace(0, 1)  # Avoid div by zero
+
+        tp_volume = typical_price * volume
+        cumulative_tp_vol = tp_volume.rolling(window=window).sum()
+        cumulative_vol = volume.rolling(window=window).sum()
+
+        vwap = cumulative_tp_vol / (cumulative_vol + 1e-10)
+        return vwap
+
+    def _compute_trapped_sentiment(self, df: pd.DataFrame, vwap: pd.Series) -> pd.Series:
+        """
+        Trapped Sentiment Index (Max Pain Theory).
+
+        วัดว่า "ฝ่ายไหนกำลังเจ็บปวด" โดยพิจารณา:
+        - ระยะห่างจาก VWAP (normalized by ATR)
+        - Volume confirmation (volume สูง = คนเข้ามาเยอะ = trapped เยอะ)
+
+        Returns:
+            > 0: Shorts trapped (ราคาสูงกว่าต้นทุน) → expect squeeze UP
+            < 0: Longs trapped (ราคาต่ำกว่าต้นทุน) → expect dump DOWN
+        """
+        atr = self._compute_atr(df)
+        distance = (df["close"] - vwap) / (atr + 1e-10)
+
+        # Volume confirmation: ถ้า volume สูงกว่าค่าเฉลี่ย = คนติดเยอะ
+        vol_ma = df["volume"].rolling(window=20).mean()
+        vol_ratio = df["volume"] / (vol_ma + 1e-10)
+        vol_factor = np.clip(vol_ratio, 0.5, 2.0)  # Clamp extreme values
+
+        # Trapped sentiment = distance * volume_factor
+        # ยิ่งห่างจาก VWAP + volume สูง = ยิ่งมีคน trapped เยอะ
+        trapped = distance * vol_factor
+
+        # Smooth with EMA to reduce noise
+        trapped_ema = trapped.ewm(span=5, adjust=False).mean()
+
+        return trapped_ema
 
     # ── Normalization ───────────────────────────
 
