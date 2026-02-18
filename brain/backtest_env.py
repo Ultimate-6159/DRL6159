@@ -379,22 +379,23 @@ class BacktestEnv(gym.Env):
 
         bonus = 0.0
 
-        # Threshold สำหรับการตัดสินใจ (หลัง normalize, ค่าที่มีนัยสำคัญประมาณ |0.5|+)
-        SENTIMENT_THRESHOLD = 0.5
+        # Threshold ลดลงจาก 0.5 → 0.3 เพื่อให้เทรดในตลาด sideways ได้บ่อยขึ้น
+        # (76% ของข้อมูลเป็น Mean Reverting ต้องเจอจังหวะง่ายขึ้น)
+        SENTIMENT_THRESHOLD = 0.3
 
         if trapped_sentiment > SENTIMENT_THRESHOLD:
             # Shorts กำลังเจ็บ → ควร BUY
             if direction == 1:  # BUY ถูกทาง
-                bonus = min(0.5, 0.2 * trapped_sentiment)  # Bonus สูงสุด +0.5
+                bonus = min(0.4, 0.15 * trapped_sentiment)  # ลด bonus เพื่อไม่ overfit
             else:  # SELL ผิดทาง
-                bonus = max(-0.3, -0.15 * trapped_sentiment)  # Penalty สูงสุด -0.3
+                bonus = max(-0.2, -0.1 * trapped_sentiment)  # ลด penalty ให้กล้าลองผิดลองถูก
 
         elif trapped_sentiment < -SENTIMENT_THRESHOLD:
             # Longs กำลังเจ็บ → ควร SELL
             if direction == -1:  # SELL ถูกทาง
-                bonus = min(0.5, 0.2 * abs(trapped_sentiment))  # Bonus สูงสุด +0.5
+                bonus = min(0.4, 0.15 * abs(trapped_sentiment))
             else:  # BUY ผิดทาง
-                bonus = max(-0.3, -0.15 * abs(trapped_sentiment))  # Penalty สูงสุด -0.3
+                bonus = max(-0.2, -0.1 * abs(trapped_sentiment))
 
         # เพิ่ม bonus ถ้า pain_intensity สูง (โอกาสดีที่จะ squeeze/dump)
         if abs(bonus) > 0 and pain_intensity > 0.3:

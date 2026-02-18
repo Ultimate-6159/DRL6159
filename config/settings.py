@@ -112,17 +112,17 @@ class PerceptionConfig:
 class DRLConfig:
     """PPO / SAC reinforcement learning settings."""
     algorithm: str = "PPO"               # "PPO" or "SAC"
-    learning_rate: float = 1.5e-4        # Reduced from 3e-4 for stable KL (was hitting early stop)
+    learning_rate: float = 1e-4          # Slower for stability (was 1.5e-4)
     gamma: float = 0.99                  # Discount factor
     gae_lambda: float = 0.95            # GAE lambda
     clip_range: float = 0.2             # Standard clip
     n_steps: int = 4096                  # More experience per update
-    batch_size: int = 512                # Larger batch → smoother gradients (was 256)
+    batch_size: int = 512                # Larger batch → smoother gradients
     n_epochs: int = 10                   # Standard epochs
     ent_coef: float = 0.05              # Standard entropy
     vf_coef: float = 0.5                # Value function coefficient
     max_grad_norm: float = 0.5          # Standard clipping
-    target_kl: float = 0.05             # Increased from 0.03 → less early stopping
+    target_kl: float = 0.05             # KL divergence limit
     normalize_advantage: bool = True     # Normalize advantages for stability
     total_timesteps: int = 3_000_000     # Train longer for better convergence
     model_save_path: str = "models/"     # Model checkpoint directory
@@ -136,14 +136,14 @@ class DRLConfig:
 @dataclass
 class RewardConfig:
     """Reward function parameters (Sharpe-based)."""
-    profit_reward: float = 2.0           # Reward per pip profit (bigger carrot)
-    loss_penalty: float = -4.0           # Penalty per pip loss (bigger stick)
-    hold_penalty: float = -0.001         # Near-zero hold penalty ? HOLD is OK
+    profit_reward: float = 2.0           # Reward per pip profit
+    loss_penalty: float = -2.2           # Balanced penalty (was -4.0 = too harsh, AI too scared)
+    hold_penalty: float = -0.001         # Near-zero hold penalty → HOLD is OK
     max_hold_steps: int = 30             # Force close faster (scalping)
-    drawdown_penalty: float = -5.0       # Harsh drawdown penalty
+    drawdown_penalty: float = -3.0       # Reduced from -5.0 (less fear of drawdown)
     sharpe_window: int = 50              # Rolling window for Sharpe calc
     risk_free_rate: float = 0.0          # Risk-free rate for Sharpe
-    optimal_close_bonus: float = 1.0     # Bigger bonus for closing at good R:R
+    optimal_close_bonus: float = 1.0     # Bonus for closing at good R:R
 
 
 # ??????????????????????????????????????????????
