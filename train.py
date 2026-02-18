@@ -649,55 +649,74 @@ Examples:
     })
     logger.info("📝 Training report initialized: %s", report.report_path)
 
-    # ── Step 1: Download Data ───────────────
-    df = download_data(config, args.bars, use_mt5=not args.no_mt5)
+    try:
+        # ── Step 1: Download Data ───────────────
+        df = download_data(config, args.bars, use_mt5=not args.no_mt5)
 
-    # ── Step 2: Preprocess ──────────────────
-    bars, features, regimes, spreads, atrs = preprocess_data(df, config)
-    logger.info("Preprocessed: %d bars → %d valid samples", len(df), len(bars))
+        # ── Step 2: Preprocess ──────────────────
+        bars, features, regimes, spreads, atrs = preprocess_data(df, config)
+        logger.info("Preprocessed: %d bars → %d valid samples", len(df), len(bars))
 
-    # Log data info to report
-    regime_counts = np.bincount(regimes, minlength=4)
-    report.log_data_info(
-        total_bars=len(df),
-        valid_bars=len(bars),
-        start_date=str(df["time"].iloc[0]) if "time" in df.columns else None,
-        end_date=str(df["time"].iloc[-1]) if "time" in df.columns else None,
-        regime_counts={
-            "TRENDING": int(regime_counts[0]),
-            "MEAN_REVERTING": int(regime_counts[1]),
-            "HIGH_VOLATILITY": int(regime_counts[2]),
-            "UNCERTAIN": int(regime_counts[3]),
-        },
-    )
+        # Log data info to report
+        regime_counts = np.bincount(regimes, minlength=4)
+        report.log_data_info(
+            total_bars=len(df),
+            valid_bars=len(bars),
+            start_date=str(df["time"].iloc[0]) if "time" in df.columns else None,
+            end_date=str(df["time"].iloc[-1]) if "time" in df.columns else None,
+            regime_counts={
+                "TRENDING": int(regime_counts[0]),
+                "MEAN_REVERTING": int(regime_counts[1]),
+                "HIGH_VOLATILITY": int(regime_counts[2]),
+                "UNCERTAIN": int(regime_counts[3]),
+            },
+        )
 
-    # ── Step 3: Train (Imitation + Curriculum) ──
-    logger.info("Creating BacktestEnv (raw features, no LSTM)...")
-    model, eval_env = train_with_curriculum(
-        bars, features, regimes, spreads, atrs,
-        config=config,
-        total_timesteps=args.timesteps,
-        use_imitation=not args.no_imitation,
-        imitation_epochs=args.imitation_epochs,
-        report=report,
-    )
+        # ── Step 3: Train (Imitation + Curriculum) ──
+        logger.info("Creating BacktestEnv (raw features, no LSTM)...")
+        model, eval_env = train_with_curriculum(
+            bars, features, regimes, spreads, atrs,
+            config=config,
+            total_timesteps=args.timesteps,
+            use_imitation=not args.no_imitation,
+            imitation_epochs=args.imitation_epochs,
+            report=report,
+        )
 
-    # ── Step 4: Evaluate ────────────────────
-    eval_stats = evaluate_model(model, eval_env, n_episodes=args.eval_episodes)
+        # ── Step 4: Evaluate ────────────────────
+        eval_stats = evaluate_model(model, eval_env, n_episodes=args.eval_episodes)
 
-    # Log evaluation results to report
-    for i, stats in enumerate(eval_stats):
-        report.log_evaluation_episode(i + 1, stats)
-    report.log_evaluation_summary(eval_stats)
+        # Log evaluation results to report
+        for i, stats in enumerate(eval_stats):
+            report.log_evaluation_episode(i + 1, stats)
+        report.log_evaluation_summary(eval_stats)
 
-    # Finalize report
-    report.finalize()
-    logger.info("📊 Training report saved to: %s", report.report_path)
+        # Finalize report (success)
+        report.finalize(status="completed")
+        logger.info("📊 Training report saved to: %s", report.report_path)
 
-    logger.info("")
-    logger.info("✅ Training complete! Model saved to: %s",
-                os.path.join(config.drl.model_save_path, "drl_model"))
-    logger.info("   Run 'python main.py --live' to trade with trained model")
+        logger.info("")
+        logger.info("✅ Training complete! Model saved to: %s",
+                    os.path.join(config.drl.model_save_path, "drl_model"))
+        logger.info("   Run 'python main.py --live' to trade with trained model")
+
+    except KeyboardInterrupt:
+        logger.warning("⚠️ Training interrupted by user (Ctrl+C)")
+        report.finalize(status="interrupted")
+        logger.info("📊 Partial report saved to: %s", report.report_path)
+        raise
+
+    except Exception as e:
+        logger.error("❌ Training failed with error: %s", str(e))
+        import traceback
+        report.report["error"] = {
+            "type": type(e).__name__,
+            "message": str(e),
+            "traceback": traceback.format_exc(),
+        }
+        report.finalize(status="failed")
+        logger.info("📊 Error report saved to: %s", report.report_path)
+        raise
 
 
 if __name__ == "__main__":
