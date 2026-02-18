@@ -112,12 +112,12 @@ class PerceptionConfig:
 class DRLConfig:
     """PPO / SAC reinforcement learning settings."""
     algorithm: str = "PPO"               # "PPO" or "SAC"
-    learning_rate: float = 1e-4          # Slower for stability (was 1.5e-4)
+    learning_rate: float = 5e-5          # Fine-tuned: was 1e-4, reduced to prevent early stopping
     gamma: float = 0.99                  # Discount factor
     gae_lambda: float = 0.95            # GAE lambda
     clip_range: float = 0.2             # Standard clip
     n_steps: int = 4096                  # More experience per update
-    batch_size: int = 512                # Larger batch → smoother gradients
+    batch_size: int = 1024               # Doubled for smoother gradients (was 512)
     n_epochs: int = 10                   # Standard epochs
     ent_coef: float = 0.05              # Standard entropy
     vf_coef: float = 0.5                # Value function coefficient
