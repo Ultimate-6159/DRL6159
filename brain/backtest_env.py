@@ -231,12 +231,15 @@ class BacktestEnv(gym.Env):
         else:
             # ── No position ────────────────────
             if action == TradeAction.HOLD.value:
-                # Minimal inactivity penalty — HOLD is a valid strategy
+                # AGGRESSIVE inactivity penalty → บีบให้เทรดบ่อย
                 self.bars_without_trade += 1
-                if self.bars_without_trade > 100:
-                    reward = -0.001  # Only penalize extreme inactivity
+                if self.bars_without_trade > 20:
+                    # Progressive penalty: ยิ่งไม่เทรดนาน ยิ่งโดนหักหนัก
+                    reward = -0.01 * (self.bars_without_trade - 20)
+                elif self.bars_without_trade > 10:
+                    reward = -0.005  # Light penalty after 10 bars
                 else:
-                    reward = 0.0  # HOLD is free → agent learns to be selective
+                    reward = 0.0
             else:
                 self.bars_without_trade = 0
                 reward = self._open_position(action, close, spread, atr)
@@ -274,8 +277,8 @@ class BacktestEnv(gym.Env):
     def _open_position(self, action, close, spread, atr):
         direction = 1 if action == TradeAction.BUY.value else -1
 
-        # ── STRICT Trend confirmation during training ──
-        # Heavy penalty for counter-trend entries
+        # ── SOFT Trend confirmation (reduced penalty) ──
+        # ลด penalty เพื่อให้ AI กล้าเข้าเทรดมากขึ้น
         trend_penalty = 0.0
         idx = self.current_step
         if idx >= 50:
@@ -284,15 +287,14 @@ class BacktestEnv(gym.Env):
             ema_slow = self._simple_ema(closes, 50)
             trend_up = ema_fast > ema_slow
 
-            # Also check price momentum
             momentum = (closes[-1] - closes[-10]) / closes[-10] if len(closes) >= 10 else 0
 
             if direction == 1:  # BUY
-                if not trend_up or momentum < -0.001:
-                    trend_penalty = -0.8  # Heavy penalty for buying in downtrend
+                if not trend_up or momentum < -0.002:
+                    trend_penalty = -0.3  # Soft penalty (was -0.8)
             else:  # SELL
-                if trend_up or momentum > 0.001:
-                    trend_penalty = -0.8  # Heavy penalty for selling in uptrend
+                if trend_up or momentum > 0.002:
+                    trend_penalty = -0.3  # Soft penalty (was -0.8)
 
         # ── MAX PAIN BONUS (Trade with trapped sentiment) ──
         # ให้ Bonus เมื่อเทรดตามทิศทางที่จะทำให้คนส่วนใหญ่เจ็บ
@@ -319,7 +321,8 @@ class BacktestEnv(gym.Env):
             "trailing_active": False,     # Trailing activated flag
         }
         self.hold_bars = 0
-        return -0.005 + trend_penalty + max_pain_bonus  # Friction + trend penalty + max pain bonus
+        # Trading bonus +0.1 → จูงใจให้เทรด (friction เกือบเป็น 0)
+        return 0.1 + trend_penalty + max_pain_bonus
 
     @staticmethod
     def _simple_ema(data, period):
