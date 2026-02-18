@@ -25,6 +25,7 @@ import pandas as pd
 # ── Internal Imports ────────────────────────────
 from config.settings import ApexConfig, MarketRegime
 from utils.logger import setup_logger
+from utils.training_report import TrainingReport, new_training_report
 from core.mt5_connector import MT5Connector
 from core.feature_engine import FeatureEngine
 from brain.regime_classifier import RegimeClassifier
@@ -269,6 +270,7 @@ def train_with_curriculum(
     total_timesteps: int,
     use_imitation: bool = True,
     imitation_epochs: int = 10,
+    report: TrainingReport = None,
 ):
     """
     Full training pipeline with Imitation Learning + Curriculum Learning.
@@ -335,6 +337,7 @@ def train_with_curriculum(
     )
 
     # ── Step 2: Imitation Pre-Training ───────────────────
+    bc_stats = None
     if use_imitation and config.imitation.enabled:
         logger.info("")
         logger.info("🎓 IMITATION LEARNING — Pre-Training from Expert Oracle")
@@ -363,8 +366,14 @@ def train_with_curriculum(
         else:
             logger.warning("⚠️ Imitation pre-training skipped: %s",
                            bc_stats.get("reason", "unknown"))
+
+        # Log imitation learning results to report
+        if report:
+            report.log_imitation(bc_stats)
     else:
         logger.info("Imitation learning disabled — skipping.")
+        if report:
+            report.log_imitation({"skipped": True, "reason": "disabled"})
 
     # ── Step 3: Curriculum Training ──────────────────────
     scheduler = CurriculumScheduler(config.curriculum)
@@ -449,6 +458,23 @@ def train_with_curriculum(
                 "%s complete in %.1f sec (%.1f min)",
                 phase["name"], elapsed, elapsed / 60,
             )
+
+            # Log curriculum phase to report
+            if report:
+                phase_regime_counts = np.bincount(p_regimes, minlength=4)
+                report.log_curriculum_phase(
+                    phase_idx=phase["phase_idx"],
+                    phase_name=phase["name"],
+                    timesteps=phase["timesteps"],
+                    bars=len(p_bars),
+                    regime_counts={
+                        "TRENDING": int(phase_regime_counts[0]),
+                        "MEAN_REVERTING": int(phase_regime_counts[1]),
+                        "HIGH_VOLATILITY": int(phase_regime_counts[2]),
+                        "UNCERTAIN": int(phase_regime_counts[3]),
+                    },
+                    elapsed_sec=elapsed,
+                )
     else:
         logger.info("Curriculum disabled — training on full data.")
         model = train_model(full_env, config, total_timesteps)
@@ -568,12 +594,43 @@ Examples:
                 "ON" if config.imitation.enabled else "OFF")
     logger.info("=" * 60)
 
+    # ── Training Report ─────────────────────
+    report = new_training_report(
+        output_dir="reports/",
+        experiment_name=f"{config.mt5.symbol}_{config.mt5.timeframe}",
+    )
+    report.log_config(config, extra_params={
+        "bars": args.bars,
+        "timesteps": args.timesteps,
+        "use_mt5": not args.no_mt5,
+        "curriculum_enabled": config.curriculum.enabled,
+        "imitation_enabled": config.imitation.enabled,
+        "imitation_epochs": args.imitation_epochs,
+        "eval_episodes": args.eval_episodes,
+    })
+    logger.info("📝 Training report initialized: %s", report.report_path)
+
     # ── Step 1: Download Data ───────────────
     df = download_data(config, args.bars, use_mt5=not args.no_mt5)
 
     # ── Step 2: Preprocess ──────────────────
     bars, features, regimes, spreads, atrs = preprocess_data(df, config)
     logger.info("Preprocessed: %d bars → %d valid samples", len(df), len(bars))
+
+    # Log data info to report
+    regime_counts = np.bincount(regimes, minlength=4)
+    report.log_data_info(
+        total_bars=len(df),
+        valid_bars=len(bars),
+        start_date=str(df["time"].iloc[0]) if "time" in df.columns else None,
+        end_date=str(df["time"].iloc[-1]) if "time" in df.columns else None,
+        regime_counts={
+            "TRENDING": int(regime_counts[0]),
+            "MEAN_REVERTING": int(regime_counts[1]),
+            "HIGH_VOLATILITY": int(regime_counts[2]),
+            "UNCERTAIN": int(regime_counts[3]),
+        },
+    )
 
     # ── Step 3: Train (Imitation + Curriculum) ──
     logger.info("Creating BacktestEnv (raw features, no LSTM)...")
@@ -583,10 +640,20 @@ Examples:
         total_timesteps=args.timesteps,
         use_imitation=not args.no_imitation,
         imitation_epochs=args.imitation_epochs,
+        report=report,
     )
 
     # ── Step 4: Evaluate ────────────────────
-    evaluate_model(model, eval_env, n_episodes=args.eval_episodes)
+    eval_stats = evaluate_model(model, eval_env, n_episodes=args.eval_episodes)
+
+    # Log evaluation results to report
+    for i, stats in enumerate(eval_stats):
+        report.log_evaluation_episode(i + 1, stats)
+    report.log_evaluation_summary(eval_stats)
+
+    # Finalize report
+    report.finalize()
+    logger.info("📊 Training report saved to: %s", report.report_path)
 
     logger.info("")
     logger.info("✅ Training complete! Model saved to: %s",
