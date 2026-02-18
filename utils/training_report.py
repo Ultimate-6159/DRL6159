@@ -12,7 +12,23 @@ from datetime import datetime
 from dataclasses import asdict
 from typing import Dict, Any, List, Optional
 
+import numpy as np
+
 logger = logging.getLogger("apex_predator.training_report")
+
+
+class NumpyEncoder(json.JSONEncoder):
+    """Custom JSON encoder for numpy types."""
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int32, np.int64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        return super().default(obj)
 
 
 class TrainingReport:
@@ -378,9 +394,9 @@ class TrainingReport:
         # Generate final recommendations
         self._generate_recommendations()
 
-        # Save JSON
+        # Save JSON (use NumpyEncoder to handle numpy types)
         with open(self.report_path, "w", encoding="utf-8") as f:
-            json.dump(self.report, f, indent=2, ensure_ascii=False)
+            json.dump(self.report, f, indent=2, ensure_ascii=False, cls=NumpyEncoder)
 
         # Save human-readable text report
         self._save_text_report()
