@@ -25,16 +25,18 @@ class TrainingReport:
     - ผล Evaluation สุดท้าย
     """
 
-    def __init__(self, report_dir: str = "reports/"):
-        self.report_dir = report_dir
-        os.makedirs(report_dir, exist_ok=True)
+    def __init__(self, output_dir: str = "reports/", experiment_name: str = None):
+        self.report_dir = output_dir
+        os.makedirs(output_dir, exist_ok=True)
 
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.report_path = os.path.join(report_dir, f"training_report_{self.timestamp}.json")
-        self.text_report_path = os.path.join(report_dir, f"training_report_{self.timestamp}.txt")
+        prefix = f"{experiment_name}_" if experiment_name else "training_report_"
+        self.report_path = os.path.join(output_dir, f"{prefix}{self.timestamp}.json")
+        self.text_report_path = os.path.join(output_dir, f"{prefix}{self.timestamp}.txt")
 
         self.report: Dict[str, Any] = {
             "meta": {
+                "experiment_name": experiment_name,
                 "timestamp": self.timestamp,
                 "started_at": datetime.now().isoformat(),
                 "completed_at": None,
@@ -66,7 +68,7 @@ class TrainingReport:
     # CONFIG LOGGING
     # ═══════════════════════════════════════════
 
-    def log_config(self, config) -> None:
+    def log_config(self, config, extra_params: Dict[str, Any] = None) -> None:
         """บันทึก configuration ทั้งหมด"""
         try:
             self.report["config"] = {
@@ -108,6 +110,9 @@ class TrainingReport:
                     "lookahead_bars": config.imitation.lookahead_bars,
                 },
             }
+            # Add extra parameters if provided
+            if extra_params:
+                self.report["config"]["extra"] = extra_params
             logger.info("Config logged to report")
         except Exception as e:
             logger.error("Failed to log config: %s", e)
@@ -119,45 +124,54 @@ class TrainingReport:
     def log_data_info(
         self,
         total_bars: int,
-        valid_samples: int,
-        date_range: tuple,
-        regime_distribution: Dict[str, int],
+        valid_bars: int,
+        start_date: str = None,
+        end_date: str = None,
+        regime_counts: Dict[str, int] = None,
     ) -> None:
         """บันทึกข้อมูลเกี่ยวกับ dataset"""
+        regime_counts = regime_counts or {}
         self.report["data_info"] = {
             "total_bars": total_bars,
-            "valid_samples": valid_samples,
-            "date_start": str(date_range[0]) if date_range else None,
-            "date_end": str(date_range[1]) if date_range else None,
-            "regime_distribution": regime_distribution,
+            "valid_bars": valid_bars,
+            "date_start": start_date,
+            "date_end": end_date,
+            "regime_distribution": regime_counts,
         }
 
         # Check for regime imbalance
-        total_regimes = sum(regime_distribution.values())
+        total_regimes = sum(regime_counts.values())
         if total_regimes > 0:
-            for regime, count in regime_distribution.items():
+            for regime, count in regime_counts.items():
                 pct = count / total_regimes
                 if pct > 0.7:
                     warning = f"⚠️ Data is {pct:.0%} {regime} - may cause bias"
                     self.report["warnings"].append(warning)
                     logger.warning(warning)
 
-        logger.info("Data info logged: %d bars, %d valid samples", total_bars, valid_samples)
+        logger.info("Data info logged: %d bars, %d valid", total_bars, valid_bars)
 
     # ═══════════════════════════════════════════
     # IMITATION LEARNING LOGGING
     # ═══════════════════════════════════════════
 
-    def log_imitation(
-        self,
-        total_samples: int,
-        buy_samples: int,
-        sell_samples: int,
-        hold_samples: int,
-        final_loss: float,
-        accuracy: float,
-    ) -> None:
-        """บันทึกผล Imitation Learning"""
+    def log_imitation(self, stats: Dict[str, Any]) -> None:
+        """บันทึกผล Imitation Learning (รับ dict จาก ImitationPreTrainer)"""
+        if stats.get("skipped"):
+            self.report["imitation_learning"] = {
+                "skipped": True,
+                "reason": stats.get("reason", "unknown"),
+            }
+            logger.info("Imitation learning skipped: %s", stats.get("reason"))
+            return
+
+        total_samples = stats.get("total_samples", 0)
+        buy_samples = stats.get("buy_samples", 0)
+        sell_samples = stats.get("sell_samples", 0)
+        hold_samples = stats.get("hold_samples", 0)
+        final_loss = stats.get("final_loss", 0.0)
+        accuracy = stats.get("accuracy", 0.0)
+
         self.report["imitation_learning"] = {
             "total_samples": total_samples,
             "buy_samples": buy_samples,
@@ -188,19 +202,24 @@ class TrainingReport:
 
     def log_curriculum_phase(
         self,
+        phase_idx: int,
         phase_name: str,
         timesteps: int,
-        duration_sec: float,
-        final_reward: float = 0.0,
+        bars: int,
+        regime_counts: Dict[str, int] = None,
+        elapsed_sec: float = 0.0,
     ) -> None:
         """บันทึกแต่ละ phase ของ curriculum"""
         self.report["curriculum_phases"].append({
-            "phase": phase_name,
+            "phase_idx": phase_idx,
+            "phase_name": phase_name,
             "timesteps": timesteps,
-            "duration_sec": duration_sec,
-            "final_reward": final_reward,
+            "bars": bars,
+            "regime_counts": regime_counts or {},
+            "elapsed_sec": elapsed_sec,
         })
-        logger.info("Curriculum phase '%s' logged: %d timesteps in %.1fs", phase_name, timesteps, duration_sec)
+        logger.info("Curriculum phase '%s' logged: %d timesteps, %d bars in %.1fs", 
+                    phase_name, timesteps, bars, elapsed_sec)
 
     # ═══════════════════════════════════════════
     # TRAINING PROGRESS LOGGING
@@ -244,37 +263,28 @@ class TrainingReport:
     # EVALUATION LOGGING
     # ═══════════════════════════════════════════
 
-    def log_evaluation_episode(
-        self,
-        episode: int,
-        total_trades: int,
-        win_rate: float,
-        pnl: float,
-        sharpe: float,
-        buy_count: int,
-        sell_count: int,
-        hold_count: int,
-    ) -> None:
-        """บันทึกผล evaluation แต่ละ episode"""
+    def log_evaluation_episode(self, episode: int, stats: Dict[str, Any]) -> None:
+        """บันทึกผล evaluation แต่ละ episode (รับ dict จาก env.get_stats())"""
         self.report["evaluation"]["episodes"].append({
             "episode": episode,
-            "total_trades": total_trades,
-            "win_rate": win_rate,
-            "pnl": pnl,
-            "sharpe": sharpe,
-            "buy_count": buy_count,
-            "sell_count": sell_count,
-            "hold_count": hold_count,
+            "total_trades": stats.get("total_trades", 0),
+            "win_rate": stats.get("win_rate", 0),
+            "pnl": stats.get("total_pnl", 0),
+            "sharpe": stats.get("sharpe_ratio", 0),
+            "final_balance": stats.get("final_balance", 0),
         })
 
-    def log_evaluation_summary(
-        self,
-        avg_trades: float,
-        avg_win_rate: float,
-        avg_pnl: float,
-        avg_sharpe: float,
-    ) -> None:
-        """บันทึกสรุปผล evaluation"""
+    def log_evaluation_summary(self, all_stats: List[Dict[str, Any]]) -> None:
+        """บันทึกสรุปผล evaluation จาก list ของ stats"""
+        import numpy as np
+        if not all_stats:
+            return
+
+        avg_trades = np.mean([s.get("total_trades", 0) for s in all_stats])
+        avg_win_rate = np.mean([s.get("win_rate", 0) for s in all_stats])
+        avg_pnl = np.mean([s.get("total_pnl", 0) for s in all_stats])
+        avg_sharpe = np.mean([s.get("sharpe_ratio", 0) for s in all_stats])
+
         self.report["evaluation"]["average"] = {
             "avg_trades": avg_trades,
             "avg_win_rate": avg_win_rate,
@@ -474,8 +484,8 @@ def get_training_report() -> TrainingReport:
     return _current_report
 
 
-def new_training_report() -> TrainingReport:
+def new_training_report(output_dir: str = "reports/", experiment_name: str = None) -> TrainingReport:
     """Create a new training report (starts fresh)."""
     global _current_report
-    _current_report = TrainingReport()
+    _current_report = TrainingReport(output_dir=output_dir, experiment_name=experiment_name)
     return _current_report
