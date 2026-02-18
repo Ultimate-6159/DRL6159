@@ -110,17 +110,17 @@ class PerceptionConfig:
 class DRLConfig:
     """PPO / SAC reinforcement learning settings."""
     algorithm: str = "PPO"               # "PPO" or "SAC"
-    learning_rate: float = 3e-4          # Higher LR for faster initial learning (was 1e-5)
+    learning_rate: float = 1.5e-4        # Reduced from 3e-4 for stable KL (was hitting early stop)
     gamma: float = 0.99                  # Discount factor
     gae_lambda: float = 0.95            # GAE lambda
-    clip_range: float = 0.2             # Standard clip (was 0.10 - too tight)
+    clip_range: float = 0.2             # Standard clip
     n_steps: int = 4096                  # More experience per update
-    batch_size: int = 256                # Larger batch → lower variance
-    n_epochs: int = 10                   # Standard epochs (was 8)
-    ent_coef: float = 0.05              # Standard entropy (0.08 was too high, causing random actions)
+    batch_size: int = 512                # Larger batch → smoother gradients (was 256)
+    n_epochs: int = 10                   # Standard epochs
+    ent_coef: float = 0.05              # Standard entropy
     vf_coef: float = 0.5                # Value function coefficient
-    max_grad_norm: float = 0.5          # Standard clipping (was 0.3 - too tight)
-    target_kl: float = 0.03             # Standard KL target (was 0.015 - too tight)
+    max_grad_norm: float = 0.5          # Standard clipping
+    target_kl: float = 0.05             # Increased from 0.03 → less early stopping
     normalize_advantage: bool = True     # Normalize advantages for stability
     total_timesteps: int = 3_000_000     # Train longer for better convergence
     model_save_path: str = "models/"     # Model checkpoint directory
