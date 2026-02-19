@@ -50,7 +50,7 @@ class ForexTradingEnv(gym.Env):
     def __init__(
         self,
         feature_dim: int = 17,
-        lookback: int = 10,
+        lookback: int = 30,
         reward_config: Optional[RewardConfig] = None,
     ):
         super().__init__()
@@ -166,7 +166,7 @@ class DRLAgent:
         perception_config: PerceptionConfig,
         reward_config: RewardConfig,
         feature_dim: int = 17,
-        lookback: int = 10,
+        lookback: int = 30,
     ):
         self.config = config
         self.env = ForexTradingEnv(

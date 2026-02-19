@@ -48,15 +48,17 @@ class BacktestEnv(gym.Env):
         regimes: np.ndarray,
         spreads: np.ndarray,
         atrs: np.ndarray,
-        lookback: int = 10,
+        lookback: int = 30,
         reward_config: Optional[RewardConfig] = None,
         initial_balance: float = 10000.0,
         lot_size: float = 0.01,
         contract_size: float = 100.0,
         point_value: float = 0.01,
-        max_hold_bars: int = 30,
-        sl_atr_mult: float = 0.5,
-        tp_atr_mult: float = 1.25,
+        max_hold_bars: int = 10,
+        sl_atr_mult: float = 1.0,
+        tp_atr_mult: float = 0.5,
+        slippage_points: float = 2.0,
+        spread_noise_pct: float = 0.3,
     ):
         """
         Args:
@@ -65,7 +67,7 @@ class BacktestEnv(gym.Env):
             regimes: (N,) int array of regime codes (0-3)
             spreads: (N,) float array of spreads per bar
             atrs: (N,) float array of ATR per bar
-            lookback: Number of past bars for observation (default: 10)
+            lookback: Number of past bars for observation (default: 30)
             reward_config: Reward parameters
             initial_balance: Starting account balance
             lot_size: Fixed lot size for training
@@ -74,6 +76,8 @@ class BacktestEnv(gym.Env):
             max_hold_bars: Max bars to hold a position
             sl_atr_mult: ATR multiplier for stop-loss
             tp_atr_mult: ATR multiplier for take-profit
+            slippage_points: Random slippage in points (0 = off)
+            spread_noise_pct: Spread jitter as fraction of base spread (0 = off)
         """
         super().__init__()
 
@@ -90,6 +94,8 @@ class BacktestEnv(gym.Env):
         self.max_hold_bars = max_hold_bars
         self.sl_atr_mult = sl_atr_mult
         self.tp_atr_mult = tp_atr_mult
+        self.slippage_points = slippage_points
+        self.spread_noise_pct = spread_noise_pct
 
         # Reward
         self.reward_config = reward_config or RewardConfig()
@@ -295,8 +301,22 @@ class BacktestEnv(gym.Env):
         # ให้ Bonus เมื่อเทรดตามทิศทางที่จะทำให้คนส่วนใหญ่เจ็บ
         max_pain_bonus = self._compute_max_pain_bonus(direction)
 
+        # ── Dynamic Spread (add random noise to simulate live conditions) ──
+        if self.spread_noise_pct > 0:
+            noise = self.np_random.uniform(
+                1.0 - self.spread_noise_pct,
+                1.0 + self.spread_noise_pct,
+            ) if self.np_random is not None else 1.0
+            spread = spread * noise
+
         spread_cost = spread * self.point_value
-        entry = close + (spread_cost / 2) * direction
+
+        # ── Slippage (random adverse price movement on entry) ──
+        slippage = 0.0
+        if self.slippage_points > 0 and self.np_random is not None:
+            slippage = self.np_random.uniform(0, self.slippage_points) * self.point_value
+
+        entry = close + (spread_cost / 2) * direction + slippage * direction
 
         sl_dist = atr * self.sl_atr_mult
         tp_dist = atr * self.tp_atr_mult
@@ -404,10 +424,10 @@ class BacktestEnv(gym.Env):
 
     def _update_trailing_stop(self, close, atr):
         """
-        Aggressive trailing stop for high win rate:
-        1. When profit >= 0.3 * ATR → move SL to breakeven
-        2. When profit >= 0.5 * ATR → trail SL tight behind best price
-        This locks in more profits and increases win rate.
+        Aggressive speed-scalping trailing stop:
+        1. profit >= 0.15 * ATR → move SL to breakeven
+        2. profit >= 0.3 * ATR → tight trail behind best price
+        Locks profits early to maximize win rate.
         """
         if self.position is None:
             return
@@ -422,18 +442,18 @@ class BacktestEnv(gym.Env):
         else:
             self.position["best_price"] = min(self.position["best_price"], close)
 
-        # Phase 1: Move to breakeven early
-        if price_diff >= atr * 0.3 and not self.position["trailing_active"]:
+        # Phase 1: Breakeven very early (0.15 ATR profit)
+        if price_diff >= atr * 0.15 and not self.position["trailing_active"]:
             if direction == 1:
-                new_sl = max(self.position["sl"], entry + atr * 0.05)
+                new_sl = max(self.position["sl"], entry + atr * 0.02)
             else:
-                new_sl = min(self.position["sl"], entry - atr * 0.05)
+                new_sl = min(self.position["sl"], entry - atr * 0.02)
             self.position["sl"] = new_sl
 
-        # Phase 2: Tight trail behind best price
-        if price_diff >= atr * 0.5:
+        # Phase 2: Tight trail (0.3 ATR profit)
+        if price_diff >= atr * 0.3:
             self.position["trailing_active"] = True
-            trail_dist = atr * 0.3  # Tighter trail → lock more profit
+            trail_dist = atr * 0.15  # Very tight trail
             if direction == 1:
                 trail_sl = self.position["best_price"] - trail_dist
                 self.position["sl"] = max(self.position["sl"], trail_sl)
@@ -463,70 +483,55 @@ class BacktestEnv(gym.Env):
 
     def _compute_reward(self, pnl, event_type=""):
         """
-        Dynamic Profit Runner Reward Function:
-        - Rewards "letting profits run" (unrealized PnL bonus)
-        - Soft time penalty (not harsh)
-        - Asymmetric: fear loss more than love gain
+        Speed-Scalping Reward (>85% WR architecture):
+        - Fast wins = massive reward (speed multiplier)
+        - Slow wins = reduced reward (time decay)
+        - Losses = harsh penalty (inverted R:R needs high WR)
+        - Drawdown = aggressive punishment
         """
         pnl_norm = pnl / self.initial_balance * 100
 
-        # ═══ DYNAMIC TIME REWARD (not penalty!) ═══
-        # ถ้ากำลังกำไร → ให้ reward ที่ถือต่อ (let profit run)
-        # ถ้ากำลังขาดทุน → ให้ penalty เบาๆ (cut loss)
-        time_factor = 0.0
-        if self.hold_bars > 0 and self.position is not None:
-            # Get current unrealized PnL direction
-            idx = min(self.current_step, len(self.bars) - 1)
-            curr_close = self.bars[idx][3]
-            direction = self.position["direction"]
-            entry = self.position["entry"]
-            unrealized = (curr_close - entry) * direction
-
-            if unrealized > 0:
-                # กำลังกำไร → BONUS for holding! (Let profit run)
-                time_factor = 0.02 * min(self.hold_bars, 30)  # Max +0.6 bonus
-            else:
-                # กำลังขาดทุน → Soft penalty (should cut loss)
-                time_factor = -0.01 * self.hold_bars  # Gentle nudge to exit
-
         if pnl >= 0:
-            # Win: base bonus + proportional + time factor
-            reward = 0.5 + pnl_norm * 1.0
+            # === WIN: speed bonus ===
+            base_reward = 1.0 + pnl_norm * 0.5
+
+            # Speed multiplier: hold_bars=1 → 3x, hold_bars=10 → 1x
+            speed_mult = max(1.0, 3.0 - (self.hold_bars / 5.0))
+            reward = base_reward * speed_mult
 
             if event_type == "TP":
-                reward += 1.2  # TP bonus
+                reward += 2.0  # TP hit = exactly what we want
 
-            # Win streak bonus (capped)
-            reward += min(self._consecutive_wins, 5) * 0.08
+            # Win streak bonus (higher cap for WR-focused strategy)
+            reward += min(self._consecutive_wins, 8) * 0.15
 
-            # Consistency bonus
+            # High WR consistency bonus
             if self._recent_trades >= 5:
                 recent_wr = self._recent_wins / self._recent_trades
-                if recent_wr >= 0.55:
+                if recent_wr >= 0.80:
+                    reward += 0.5
+                elif recent_wr >= 0.60:
                     reward += 0.2
         else:
-            # Loss: ASYMMETRIC - fear loss more!
-            reward = -0.8 + pnl_norm * 1.5  # Steeper loss penalty
+            # === LOSS: harsh penalty ===
+            reward = -2.0 + pnl_norm * 2.0
 
             if event_type == "SL":
-                reward -= 0.3  # SL hit = bad
+                reward -= 1.0
             elif event_type == "FORCE":
-                reward -= 1.0  # Force close = very bad
+                reward -= 2.0  # Worst outcome
 
-            # Consecutive loss penalty (stronger)
+            # Consecutive loss = exponential pain
             if self._consecutive_losses >= 2:
-                reward -= 0.3 * (self._consecutive_losses - 1)
+                reward -= 0.5 * (self._consecutive_losses - 1)
 
-        # Add time factor
-        reward += time_factor
-
-        # Drawdown penalty — starts at 3% DD (asymmetric!)
+        # Drawdown penalty — aggressive (starts at 2% DD)
         dd = (self.peak_equity - self.equity) / max(self.peak_equity, 1.0)
-        if dd > 0.03:
-            reward -= dd * 3.0  # Stronger drawdown aversion
+        if dd > 0.02:
+            reward -= dd * 5.0
 
-        # ═══ REWARD CLIPPING ═══
-        reward = float(np.clip(reward, -3.0, 3.0))
+        # Clip
+        reward = float(np.clip(reward, -5.0, 5.0))
 
         # ═══ REWARD SMOOTHING ═══
         self._reward_ema = (
@@ -536,7 +541,7 @@ class BacktestEnv(gym.Env):
 
         smoothed_reward = 0.7 * reward + 0.3 * self._reward_ema
 
-        return float(np.clip(smoothed_reward, -3.0, 3.0))
+        return float(np.clip(smoothed_reward, -5.0, 5.0))
 
     def _get_observation(self):
         """

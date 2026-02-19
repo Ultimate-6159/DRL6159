@@ -126,11 +126,18 @@ class OnlineTrainer:
             )
             agent.save(checkpoint_path)
 
-            # Retrain with collected experiences
-            # Note: PPO uses on-policy learning, so we retrain with
-            # the environment stepping through collected data
-            retrain_steps = min(n_samples * 2, 10_000)
-            agent.train(total_timesteps=retrain_steps)
+            # PPO is on-policy — it cannot use a replay buffer.
+            # Instead, we log buffer stats and skip the retrain call.
+            # Real online learning requires a full env rollout or
+            # switching to an off-policy algorithm (e.g. SAC + HER).
+            logger.info(
+                "Online retrain skipped — PPO is on-policy and cannot "
+                "consume replay buffer (buffer=%d). Use scheduled "
+                "walk-forward retraining instead.",
+                n_samples,
+            )
+            # Clear buffer to free memory
+            self._replay_buffer.clear()
 
             self._model_version += 1
             self._last_retrain_time = time.time()

@@ -72,8 +72,8 @@ class ApexPredator:
 
         # ── Layer 2: Brain ──────────────────────
         self.regime_classifier = RegimeClassifier(config.regime)
-        self._feature_dim = len(config.features.features)  # 17
-        self._lookback = 10  # Must match training BacktestEnv
+        self._feature_dim = len(config.features.features)
+        self._lookback = config.drl.lookback  # Centralized in DRLConfig
         self.drl_agent = DRLAgent(
             config.drl, config.perception, config.reward,
             feature_dim=self._feature_dim,
@@ -253,7 +253,7 @@ class ApexPredator:
         5. Learn from result
         """
         last_decision_time = 0.0  # Track when we last made a trading decision
-        decision_interval = 10.0  # Minimum seconds between trading decisions
+        decision_interval = 10.0  # Minimum seconds between trading decisions (high frequency)
 
         while self._running:
             try:
@@ -386,10 +386,33 @@ class ApexPredator:
                 action, confidence = self.drl_agent.predict(observation)
                 raw_action = action  # Save for diagnostics
 
-                # ── Step 8.5: Trend Confirmation Filter ──
-                # Prevent trading against the dominant trend
+                # ── Step 8.1: Session Filter (avoid high-vol opens) ──
                 if action != TradeAction.HOLD:
-                    action = self._apply_trend_filter(action, full_buffer)
+                    if not self._session_filter():
+                        self.logger.debug("SESSION FILTER: %s blocked (high-vol session)", action.name)
+                        action = TradeAction.HOLD
+
+                # ── Step 8.2: Spread Filter ──
+                if action != TradeAction.HOLD:
+                    atr_check = self.feature_engine._compute_atr(full_buffer)
+                    current_atr_val = float(atr_check.iloc[-1]) if not atr_check.empty else 1.0
+                    spread_as_price = spread * 0.001  # XAUUSDm point=0.001
+                    if current_atr_val > 0 and spread_as_price / current_atr_val > 0.15:
+                        self.logger.info("SPREAD FILTER: %s blocked (spread/ATR=%.1f%% > 15%%)",
+                                         action.name, spread_as_price / current_atr_val * 100)
+                        action = TradeAction.HOLD
+
+                # ── Step 8.3: Confidence Gate (minimum 70%) ──
+                MIN_CONFIDENCE = 0.70
+                if action != TradeAction.HOLD and confidence < MIN_CONFIDENCE:
+                    self.logger.info("CONFIDENCE GATE: %s blocked (conf=%.2f < %.2f)",
+                                     action.name, confidence, MIN_CONFIDENCE)
+                    action = TradeAction.HOLD
+
+                # ── Step 8.4: Trend Confirmation Filter ──
+                # Regime-aware: relaxed in MEAN_REVERTING (allows counter-trend)
+                if action != TradeAction.HOLD:
+                    action = self._apply_trend_filter(action, full_buffer, regime)
 
                 # Diagnostic logging every 10 loops (more frequent for monitoring)
                 if self._loop_count % 10 == 0:
@@ -563,10 +586,12 @@ class ApexPredator:
     # TREND FILTER — Prevent Trading Against the Trend
     # ═══════════════════════════════════════════
 
-    def _apply_trend_filter(self, action: TradeAction, df) -> TradeAction:
+    def _apply_trend_filter(self, action: TradeAction, df, regime: MarketRegime = None) -> TradeAction:
         """
-        STRICT trend filter - MUST trade with the trend, not against it.
-        Uses multiple timeframe confirmation.
+        Regime-aware trend filter:
+        - TRENDING: strict 4/5 signal requirement (trade WITH trend)
+        - MEAN_REVERTING: relaxed 2/5 (allow counter-trend scalping)
+        - Other: moderate 3/5
         """
         if df is None or len(df) < 100:
             return action
@@ -596,35 +621,51 @@ class ApexPredator:
             price_above_ema50,
             price_above_ema100,
             ema_bullish_aligned,
-            recent_momentum > 0.001,  # 0.1% up momentum
+            recent_momentum > 0.001,
         ])
 
         bearish_signals = 5 - bullish_signals
 
-        # Log for debugging
-        self.logger.info(
-            "TREND CHECK | Price: %.2f | EMA20: %.2f | EMA50: %.2f | EMA100: %.2f | "
-            "Bullish: %d/5 | Bearish: %d/5 | Momentum: %.4f",
-            close[-1], ema_20[-1], ema_50[-1], ema_100[-1],
-            bullish_signals, bearish_signals, recent_momentum
-        )
+        # Regime-adaptive threshold
+        if regime == MarketRegime.MEAN_REVERTING:
+            min_signals = 2  # Relaxed: counter-trend OK in sideways
+        elif regime == MarketRegime.TRENDING:
+            min_signals = 4  # Strict: must trade WITH the trend
+        else:
+            min_signals = 3  # Moderate
 
-        # STRICT RULES:
-        # - Need 4/5 bullish signals to BUY
-        # - Need 4/5 bearish signals to SELL
-        # - Otherwise HOLD
+        # Log for debugging
+        if self._loop_count % 10 == 0:
+            self.logger.info(
+                "TREND CHECK | Bullish: %d/5 | Bearish: %d/5 | Regime: %s | MinReq: %d",
+                bullish_signals, bearish_signals,
+                regime.value if regime else "?", min_signals,
+            )
 
         if action == TradeAction.BUY:
-            if bullish_signals < 4:
-                self.logger.info("TREND FILTER: BUY blocked (bullish=%d/5, need 4)", bullish_signals)
+            if bullish_signals < min_signals:
+                self.logger.info("TREND FILTER: BUY blocked (bullish=%d/5, need %d)",
+                                 bullish_signals, min_signals)
                 return TradeAction.HOLD
         elif action == TradeAction.SELL:
-            if bearish_signals < 4:
-                self.logger.info("TREND FILTER: SELL blocked (bearish=%d/5, need 4)", bearish_signals)
+            if bearish_signals < min_signals:
+                self.logger.info("TREND FILTER: SELL blocked (bearish=%d/5, need %d)",
+                                 bearish_signals, min_signals)
                 return TradeAction.HOLD
 
-        self.logger.info("TREND FILTER: %s approved", action.name)
         return action
+
+    def _session_filter(self) -> bool:
+        """
+        Session filter: block high-volatility session opens.
+        London open (08:00-09:00 UTC) and NY open (13:00-14:00 UTC)
+        have news-driven spikes that kill mean-reversion scalping.
+        """
+        hour = datetime.utcnow().hour
+        # Block London open and NY open (highest vol hours)
+        if hour in (8, 13):
+            return False
+        return True
 
     @staticmethod
     def _ema(data: np.ndarray, period: int) -> np.ndarray:

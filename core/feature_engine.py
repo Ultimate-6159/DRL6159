@@ -71,11 +71,6 @@ class FeatureEngine:
         rolling_std = df["close"].rolling(window=window).std()
         features["z_score"] = (df["close"] - rolling_mean) / (rolling_std + 1e-10)
 
-        # ── Volatility ──────────────────────────
-        features["volatility"] = df["close"].pct_change().rolling(
-            window=self.config.atr_period
-        ).std()
-
         # ── Momentum ────────────────────────────
         features["momentum"] = df["close"] - df["close"].shift(self.config.atr_period)
 
@@ -101,24 +96,10 @@ class FeatureEngine:
         bb_lower = bb_mid - 2 * bb_std
         features["bb_position"] = (df["close"] - bb_lower) / (bb_upper - bb_lower + 1e-10)
 
-        # ── 3-bar Price Change ───────────────────
-        features["price_change_3"] = df["close"].pct_change(3)
-
-        # ── High-Low Ratio (bar volatility) ──────
-        features["high_low_ratio"] = (df["high"] - df["low"]) / (df["close"] + 1e-10)
-
         # ── Body Ratio (candle strength) ─────────
         features["body_ratio"] = (df["close"] - df["open"]) / (df["high"] - df["low"] + 1e-10)
 
-        # ── MOMENTUM SNIPER FEATURES (ตรวจจับจังหวะระเบิด) ────
-        # 1. RSI Fast (5-period) - แรงส่งระยะสั้น
-        features["rsi_fast"] = self._compute_rsi(df["close"], 5)
-
-        # 2. Bollinger Band Width - ดูกราฟบีบตัว (Squeeze) รอระเบิด
-        bb_width_raw = (bb_upper - bb_lower) / (bb_mid + 1e-10)
-        features["bb_width"] = bb_width_raw
-
-        # 3. Volume Spike - แรงกระชากของ Volume เทียบกับค่าเฉลี่ย
+        # ── Volume Spike — แรงกระชากของ Volume เทียบกับค่าเฉลี่ย
         vol_ma = df["volume"].rolling(window=20).mean()
         features["vol_spike"] = df["volume"].astype(float) / (vol_ma + 1e-10)
 
@@ -130,10 +111,6 @@ class FeatureEngine:
         ema50 = df["close"].ewm(span=50, adjust=False).mean()
         features["ema50_distance"] = (df["close"] - ema50) / (features["atr"] + 1e-10)
 
-        # EMA 200 Distance: ราคาห่างจาก EMA 200 แค่ไหน (long-term trend)
-        ema200 = df["close"].ewm(span=200, adjust=False).mean()
-        features["ema200_distance"] = (df["close"] - ema200) / (features["atr"] + 1e-10)
-
         # ── VWAP & Trapped Sentiment (Max Pain Theory) ────
         # VWAP = Volume Weighted Average Price = "ต้นทุนเฉลี่ยของตลาด"
         vwap = self._compute_vwap(df, window=20)
@@ -144,8 +121,11 @@ class FeatureEngine:
         # < 0 = Longs กำลังติดดอย (ราคาต่ำกว่าต้นทุนเฉลี่ย) → พร้อม dump ลง
         features["trapped_sentiment"] = self._compute_trapped_sentiment(df, vwap)
 
-        # Pain Intensity: ความรุนแรงของความเจ็บปวด (ยิ่งห่างยิ่งเจ็บ)
-        features["pain_intensity"] = abs(features["vwap_distance"]) * features["volatility"]
+        # Pain Intensity: distance from VWAP * rolling ATR-normalized volatility
+        rolling_vol = df["close"].pct_change().rolling(
+            window=self.config.atr_period
+        ).std()
+        features["pain_intensity"] = abs(features["vwap_distance"]) * rolling_vol
 
         # ── Drop NaN rows (from rolling calculations)
         features = features.dropna().reset_index(drop=True)

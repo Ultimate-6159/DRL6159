@@ -5,9 +5,18 @@ Apex Predator DRL Trading System -- Central Configuration
 All system parameters in one place. No magic numbers scattered across modules.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 from enum import Enum
+from pathlib import Path
+
+# Load .env from project root
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass  # python-dotenv not installed; rely on real env vars
 
 
 # ??????????????????????????????????????????????
@@ -36,12 +45,12 @@ class TradeAction(Enum):
 @dataclass
 class MT5Config:
     """MetaTrader 5 connection settings."""
-    login: int = 415146568                       # MT5 account number
-    password: str = "Ultimate@6159"                   # MT5 account password
-    server: str = "Exness-MT5Trial14"                     # Broker server name
+    login: int = int(os.getenv("MT5_LOGIN", "0"))
+    password: str = os.getenv("MT5_PASSWORD", "")
+    server: str = os.getenv("MT5_SERVER", "")
     path: str = r"C:\Program Files\MetaTrader 5\terminal64.exe"
     symbol: str = "XAUUSDm"
-    timeframe: str = "M1"               # M1, M5, M15, H1 etc.
+    timeframe: str = "M5"               # M5 = better spread-to-ATR ratio (was M1)
     magic_number: int = 616159           # Unique EA identifier
     deviation: int = 20                  # Max slippage in points
     fill_type: str = "IOC"              # IOC, FOK, RETURN
@@ -63,13 +72,11 @@ class FeatureConfig:
     features: List[str] = field(default_factory=lambda: [
         "close", "high", "low", "volume",
         "spread", "atr", "returns", "z_score",
-        "volatility", "momentum", "rsi_raw",
+        "momentum", "rsi_raw",
         "ema_cross", "macd_signal", "bb_position",
-        "price_change_3", "high_low_ratio", "body_ratio",
-        # Momentum Sniper features
-        "rsi_fast", "bb_width", "vol_spike",
-        # Multi-Timeframe Context (NEW!)
-        "adx", "ema50_distance", "ema200_distance",
+        "body_ratio", "vol_spike",
+        # Multi-Timeframe Context
+        "adx", "ema50_distance",
         # Max Pain Theory features
         "vwap_distance", "trapped_sentiment", "pain_intensity",
     ])
@@ -98,7 +105,7 @@ class RegimeConfig:
 @dataclass
 class PerceptionConfig:
     """LSTM / Transformer neural network settings."""
-    input_dim: int = 26                  # Number of features (17 base + 3 Momentum + 3 MTF + 3 MaxPain)
+    input_dim: int = 20                  # Number of features (20 after removing 6 correlated)
     hidden_dim: int = 128                # LSTM hidden state size
     num_layers: int = 2                  # Number of LSTM layers
     dropout: float = 0.2                 # Dropout rate
@@ -123,12 +130,13 @@ class DRLConfig:
     n_steps: int = 8192                  # DOUBLED: more experience per update (was 4096)
     batch_size: int = 2048               # DOUBLED: smoother gradients (was 1024)
     n_epochs: int = 10                   # Standard epochs
-    ent_coef: float = 0.02              # REDUCED: more decisive actions (was 0.05)
+    ent_coef: float = 0.01              # Very decisive: exploit > explore for scalping
     vf_coef: float = 0.5                # Value function coefficient
     max_grad_norm: float = 0.5          # Standard clipping
     target_kl: float = 0.03             # Tighter KL limit for stability
     normalize_advantage: bool = True     # Normalize advantages for stability
-    total_timesteps: int = 3_000_000     # Train longer for better convergence
+    total_timesteps: int = 5_000_000     # Train longer for speed-scalping convergence
+    lookback: int = 30                   # Observation window in bars (was 10, too short)
     model_save_path: str = "models/"     # Model checkpoint directory
     tensorboard_log: str = "logs/tb/"    # TensorBoard log directory
 
@@ -140,10 +148,10 @@ class DRLConfig:
 @dataclass
 class RewardConfig:
     """Reward function parameters (Dynamic Profit Runner style)."""
-    profit_reward: float = 1.5           # Moderate reward
-    loss_penalty: float = -1.5           # Balanced penalty
-    hold_penalty: float = -0.01          # REDUCED: ให้ AI "ทนรวย" ได้
-    max_hold_steps: int = 60             # EXPANDED: 60 bars = 1 ชม. (was 20)
+    profit_reward: float = 2.0           # Strong reward for wins
+    loss_penalty: float = -3.0           # Harsh loss penalty (inverted R:R needs high WR)
+    hold_penalty: float = -0.05          # Pressure to exit fast
+    max_hold_steps: int = 10             # 10 bars x M5 = 50 min max (speed scalping)
     drawdown_penalty: float = -5.0       # Strong drawdown aversion
     sharpe_window: int = 50              # Rolling window for Sharpe calc
     risk_free_rate: float = 0.0          # Risk-free rate for Sharpe
@@ -157,16 +165,16 @@ class RewardConfig:
 @dataclass
 class RiskConfig:
     """Hard-coded risk management parameters (Sniper style)."""
-    max_risk_per_trade: float = 0.01     # 1% risk per trade (Anti-Martingale: auto-adjusts with balance)
+    max_risk_per_trade: float = 0.005    # 0.5% risk (smaller since inverted R:R)
     max_daily_loss: float = 0.03         # Max 3% daily drawdown
-    max_total_drawdown: float = 0.10     # Max 10% total drawdown -> halt
-    max_concurrent_trades: int = 1       # SINGLE position only → avoid stacking losses
+    max_total_drawdown: float = 0.15     # Max 15% total drawdown -> halt (wider for scalp drawdowns)
+    max_concurrent_trades: int = 1       # SINGLE position only
     max_lot_size: float = 0.5            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
-    atr_multiplier: float = 1.0          # SL = ATR * 1.0 (tight SL)
-    tp_ratio: float = 2.0                # TP = SL * 2.0 (let profits RUN! was 1.2)
+    atr_multiplier: float = 2.0          # SL = ATR * 2.0 (wide SL → avoid noise stop-outs)
+    tp_ratio: float = 0.5                # TP = SL * 0.5 (INVERTED R:R → narrow TP → high WR)
     min_sl_spread_mult: float = 3.0      # SL must be >= 3x spread
-    trade_cooldown_sec: int = 30         # 30 sec cooldown (faster re-entry)
+    trade_cooldown_sec: int = 30          # 30 sec cooldown (trade frequently)
 
 
 # ??????????????????????????????????????????????
@@ -176,11 +184,11 @@ class RiskConfig:
 @dataclass
 class CircuitBreakerConfig:
     """Emergency stop parameters."""
-    max_consecutive_losses: int = 3      # Halt after 3 consecutive losses
-    cooldown_minutes: int = 30           # Cooldown period after halt
-    drawdown_halt_pct: float = 0.05      # Halt if drawdown reaches 5%
-    max_daily_trades: int = 100          # Limit daily trades
-    spread_spike_multiplier: float = 3.0 # Halt if spread > 3x normal (XAUUSDm spreads vary more)
+    max_consecutive_losses: int = 5      # Allow 5 consecutive losses (high WR recovers fast)
+    cooldown_minutes: int = 15           # Shorter cooldown (don't miss opportunities)
+    drawdown_halt_pct: float = 0.08      # Halt at 8% drawdown
+    max_daily_trades: int = 200          # Allow more trades (high frequency target)
+    spread_spike_multiplier: float = 3.0 # Halt if spread > 3x normal
 
 
 # ??????????????????????????????????????????????

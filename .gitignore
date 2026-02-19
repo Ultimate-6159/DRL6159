@@ -45,5 +45,6 @@ Thumbs.db
 desktop.ini
 
 # ── Secrets (NEVER commit!) ─────────────────
-# config/settings.py contains credentials
-# Make sure to update credentials on VPS!
+.env
+*.env
+!.env.example

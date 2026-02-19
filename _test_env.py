@@ -11,12 +11,12 @@ bars = np.column_stack([
     close - abs(np.random.randn(N) * 0.3),  # low
     close,                                    # close
 ]).astype(np.float32)
-feats = np.random.rand(N, 17).astype(np.float32)
+feats = np.random.rand(N, 20).astype(np.float32)
 reg = np.zeros(N, dtype=np.int32)
 sp = np.full(N, 2.0, dtype=np.float32)
 atr = np.full(N, 1.0, dtype=np.float32)
 
-env = BacktestEnv(bars, feats, reg, sp, atr)
+env = BacktestEnv(bars, feats, reg, sp, atr, lookback=30)
 obs, _ = env.reset()
 done = False
 steps = 0

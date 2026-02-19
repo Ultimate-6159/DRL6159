@@ -189,7 +189,7 @@ def create_train_env(
         regimes=regimes,
         spreads=spreads,
         atrs=atrs,
-        lookback=10,
+        lookback=config.drl.lookback,
         reward_config=config.reward,
         initial_balance=10000.0,
         lot_size=0.01,
