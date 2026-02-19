@@ -14,9 +14,9 @@ from pathlib import Path
 # Load .env from project root
 try:
     from dotenv import load_dotenv
-    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-except ImportError:
-    pass  # python-dotenv not installed; rely on real env vars
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", encoding="utf-8")
+except (ImportError, UnicodeDecodeError):
+    pass  # python-dotenv not installed or .env encoding issue; rely on real env vars
 
 
 # ??????????????????????????????????????????????
