@@ -156,15 +156,15 @@ class RewardConfig:
 
 @dataclass
 class RiskConfig:
-    """Hard-coded risk management parameters (Momentum Sniper style)."""
-    max_risk_per_trade: float = 0.01     # 1% risk per trade (aggressive scalping)
+    """Hard-coded risk management parameters (Sniper style)."""
+    max_risk_per_trade: float = 0.01     # 1% risk per trade (Anti-Martingale: auto-adjusts with balance)
     max_daily_loss: float = 0.03         # Max 3% daily drawdown
     max_total_drawdown: float = 0.10     # Max 10% total drawdown -> halt
     max_concurrent_trades: int = 1       # SINGLE position only → avoid stacking losses
     max_lot_size: float = 0.5            # Absolute max lot size
     min_lot_size: float = 0.01           # Minimum lot size
-    atr_multiplier: float = 1.0          # SL = ATR * 1.0 (tighter SL for scalping)
-    tp_ratio: float = 1.2                # TP = SL * 1.2 (50% win rate = profit)
+    atr_multiplier: float = 1.0          # SL = ATR * 1.0 (tight SL)
+    tp_ratio: float = 2.0                # TP = SL * 2.0 (let profits RUN! was 1.2)
     min_sl_spread_mult: float = 3.0      # SL must be >= 3x spread
     trade_cooldown_sec: int = 30         # 30 sec cooldown (faster re-entry)
 

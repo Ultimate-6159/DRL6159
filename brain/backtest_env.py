@@ -231,15 +231,10 @@ class BacktestEnv(gym.Env):
         else:
             # ── No position ────────────────────
             if action == TradeAction.HOLD.value:
-                # AGGRESSIVE inactivity penalty → บีบให้เทรดบ่อย
+                # ✅ HOLD is FREE - ให้ AI รอจังหวะ Sniper ได้
+                # ไม่หักคะแนน = AI จะเรียนรู้ว่า "นั่งทับมือตัวเอง" เป็นกลยุทธ์ที่ดี
                 self.bars_without_trade += 1
-                if self.bars_without_trade > 20:
-                    # Progressive penalty: ยิ่งไม่เทรดนาน ยิ่งโดนหักหนัก
-                    reward = -0.01 * (self.bars_without_trade - 20)
-                elif self.bars_without_trade > 10:
-                    reward = -0.005  # Light penalty after 10 bars
-                else:
-                    reward = 0.0
+                reward = 0.0  # Patience is a virtue!
             else:
                 self.bars_without_trade = 0
                 reward = self._open_position(action, close, spread, atr)
@@ -321,8 +316,9 @@ class BacktestEnv(gym.Env):
             "trailing_active": False,     # Trailing activated flag
         }
         self.hold_bars = 0
-        # Trading bonus +0.1 → จูงใจให้เทรด (friction เกือบเป็น 0)
-        return 0.1 + trend_penalty + max_pain_bonus
+        # ✅ Small friction cost (spread) + bonuses for quality entries
+        # ไม่มี trading bonus → AI จะเทรดเฉพาะเมื่อมั่นใจ
+        return -0.01 + trend_penalty + max_pain_bonus
 
     @staticmethod
     def _simple_ema(data, period):
